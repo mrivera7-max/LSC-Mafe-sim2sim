@@ -2,13 +2,13 @@
 Interfaz grafica del sistema Voz/Texto -> Sena LSC.
 
 Permite escribir texto o usar el microfono, y muestra la traduccion
-mientras se transmite al visor 3D y al robot G1 (si está conectado).
+mientras la sena se ejecuta en el G1 de 29 GDL dentro de MuJoCo (politica
+SONIC, ver robot/conector_sonic.py) o en el G1 compartido de la pestana Camara.
 """
 
 import logging
 import sys
 import threading
-import webbrowser
 from pathlib import Path
 
 import tkinter as tk
@@ -17,7 +17,8 @@ from tkinter import scrolledtext
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.logger import configurar_logger
-from voz_a_sena.servidor import ServidorVozASena, PUERTO_HTTP
+from voz_a_sena.servidor import ServidorVozASena
+from robot.conector_sonic import ConectorSonic
 
 log = logging.getLogger("voz_a_sena.gui")
 
@@ -28,10 +29,12 @@ class VentanaVozASena:
     def __init__(self):
         self.servidor = ServidorVozASena()
         self.robot = None  # ConectorG1 compartido; lo asigna app_unificada.py
+        self.sonic = None  # ConectorSonic (MuJoCo, 29 GDL); se crea al pulsar «Conectar MuJoCo»
         self._raiz = None
         self._contenedor = None
         self._escuchando = False
-        self._servidor_iniciado = False
+        self._conectando_sonic = False
+        self._lock_sonic = threading.Lock()  # las secuencias se ejecutan una tras otra
 
     def ejecutar(self):
         """Modo autónomo: crea su propia ventana y mainloop."""
@@ -43,47 +46,78 @@ class VentanaVozASena:
 
         self._contenedor = self._raiz
         self._construir_ui()
-
-        log.info("Iniciando servidores HTTP y WebSocket...")
-        self.servidor.iniciar_servidores()
-        self._servidor_iniciado = True
-
-        self._raiz.after(800, self._abrir_visor)
+        self._agregar_log_inicial()
         self._raiz.mainloop()
 
     def montar_en(self, contenedor, raiz):
         """Construye la UI de voz dentro de un contenedor externo (pestaña),
         compartiendo la raíz de la app unificada. No crea tk.Tk() ni mainloop.
 
-        El servidor HTTP/WebSocket se arranca aquí, pero el visor 3D NO se
-        abre solo: se abre cuando el usuario pulsa el botón (evita lanzar el
-        navegador al iniciar la app). El avatar sigue en el navegador porque
-        es WebGL y Tkinter no lo puede incrustar.
+        Ya no se levanta el servidor HTTP/WebSocket del visor 3D del navegador:
+        las señas se ejecutan en MuJoCo (botón «Conectar MuJoCo G1»).
         """
         self._raiz = raiz
         self._contenedor = contenedor
         self._construir_ui()
-
-        log.info("Iniciando servidores HTTP y WebSocket (pestaña voz)...")
-        self.servidor.iniciar_servidores()
-        self._servidor_iniciado = True
-        self._agregar_log("Servidor listo. Pulsa «↗ Abrir visor 3D» para ver el avatar.")
+        self._agregar_log_inicial()
         log.info("Panel de voz montado en pestaña")
 
-    def cerrar(self):
-        """Detiene el servidor sin destruir la raíz."""
-        try:
-            detener = getattr(self.servidor, "detener_servidores", None)
-            if callable(detener):
-                detener()
-        except Exception:
-            pass
+    def _agregar_log_inicial(self):
+        self._agregar_log("Arranca MuJoCo y el deploy SONIC (docs/sonic_mujoco.md) "
+                          "y pulsa «▶ Conectar MuJoCo G1».")
 
-    def _abrir_visor(self):
-        url = f"http://localhost:{PUERTO_HTTP}"
-        log.info(f"Abriendo visor 3D en {url}")
-        webbrowser.open(url)
-        self._agregar_log(f"Visor 3D abierto en: {url}")
+    def cerrar(self):
+        """Cierra la conexión con MuJoCo sin destruir la raíz."""
+        sonic, self.sonic = self.sonic, None
+        if sonic is not None:
+            try:
+                sonic.cerrar()
+            except Exception:
+                pass
+
+    # ── Conexión con MuJoCo (SONIC) ──────────────────────────────────
+
+    def _alternar_sonic(self):
+        if self._conectando_sonic:
+            return
+        if self.sonic is not None and self.sonic.conectado:
+            threading.Thread(target=self._desconectar_sonic, daemon=True).start()
+        else:
+            self._conectando_sonic = True
+            self._boton_sonic.configure(state="disabled", text="Conectando…")
+            threading.Thread(target=self._conectar_sonic, daemon=True).start()
+
+    def _conectar_sonic(self):
+        sonic = ConectorSonic()
+        if not sonic.conectar():
+            self._raiz.after(0, self._sonic_fallo, sonic.error or "error desconocido")
+            return
+        sonic.iniciar_control()
+        self.sonic = sonic
+        self._raiz.after(0, self._sonic_listo)
+
+    def _desconectar_sonic(self):
+        with self._lock_sonic:  # espera a que termine la seña en curso
+            self.cerrar()
+        self._raiz.after(0, self._sonic_desconectado)
+
+    def _sonic_listo(self):
+        self._conectando_sonic = False
+        self._boton_sonic.configure(state="normal", text="■ Desconectar MuJoCo")
+        self._lbl_sonic.configure(text="● MuJoCo conectado (:5556)", fg="#86efac")
+        self._agregar_log("Publicando hacia el deploy SONIC. Si el G1 sigue colgado, "
+                          "pulsa 9 en la ventana de MuJoCo para soltarlo.")
+
+    def _sonic_fallo(self, mensaje: str):
+        self._conectando_sonic = False
+        self._boton_sonic.configure(state="normal", text="▶ Conectar MuJoCo G1")
+        self._lbl_sonic.configure(text="● MuJoCo sin conectar", fg="#bfdbfe")
+        self._agregar_log(f"[ERROR] No se pudo conectar: {mensaje}")
+
+    def _sonic_desconectado(self):
+        self._boton_sonic.configure(state="normal", text="▶ Conectar MuJoCo G1")
+        self._lbl_sonic.configure(text="● MuJoCo sin conectar", fg="#bfdbfe")
+        self._agregar_log("MuJoCo desconectado.")
 
     def _construir_ui(self):
         c_fondo = "#1a1a2e"
@@ -102,12 +136,18 @@ class VentanaVozASena:
         tk.Label(encabezado, text="Voz / Texto  →  Sena  →  Robot G1", bg=c_acento,
                  fg="#bfdbfe", font=("Segoe UI", 10)).pack(side="left", pady=14)
 
-        boton_visor = tk.Button(
-            encabezado, text="↗ Abrir visor 3D", bg="white", fg=c_acento,
+        self._boton_sonic = tk.Button(
+            encabezado, text="▶ Conectar MuJoCo G1", bg="white", fg=c_acento,
             relief="flat", font=("Segoe UI", 9, "bold"), padx=10,
-            cursor="hand2", command=self._abrir_visor,
+            cursor="hand2", command=self._alternar_sonic,
         )
-        boton_visor.pack(side="right", padx=16, pady=14)
+        self._boton_sonic.pack(side="right", padx=(8, 16), pady=14)
+
+        self._lbl_sonic = tk.Label(
+            encabezado, text="● MuJoCo sin conectar", bg=c_acento, fg="#bfdbfe",
+            font=("Segoe UI", 9),
+        )
+        self._lbl_sonic.pack(side="right", pady=14)
 
         # Panel de entrada de texto
         panel_texto = tk.Frame(cont, bg=c_panel, padx=20, pady=16)
@@ -226,12 +266,15 @@ class VentanaVozASena:
             self._lbl_secuencia.configure(text="  →  ".join(señas))
             self._agregar_log(f"Secuencia generada: {' -> '.join(señas)}")
 
-            # Enviar también al robot G1 (simulador o real) si está conectado
-            if self.robot is not None and self.robot.conectado:
+            # Ejecutar en el G1: primero MuJoCo/SONIC; si no, el G1 de la pestaña Cámara
+            if self.sonic is not None and self.sonic.conectado:
+                threading.Thread(target=self._enviar_a_sonic, args=(señas,),
+                                 daemon=True).start()
+            elif self.robot is not None and self.robot.conectado:
                 threading.Thread(target=self._enviar_al_robot, args=(señas,),
                                  daemon=True).start()
-            elif self.robot is not None:
-                self._agregar_log("Robot G1 no conectado: pulsa 'Conectar G1' en la pestaña Cámara")
+            else:
+                self._agregar_log("Sin simulación conectada: pulsa «▶ Conectar MuJoCo G1»")
 
             no_reconocidas = resultado.get("no_reconocidas", [])
             if no_reconocidas:
@@ -250,6 +293,18 @@ class VentanaVozASena:
             no_reconocidas = resultado.get("no_reconocidas", [])
             if no_reconocidas:
                 self._mostrar_boton_ensenar(" ".join(no_reconocidas))
+
+    def _enviar_a_sonic(self, señas):
+        """Ejecuta la secuencia en el G1 de MuJoCo y vuelve a la postura de pie."""
+        with self._lock_sonic:
+            sonic = self.sonic
+            if sonic is None or not sonic.conectado:
+                return
+            for s in señas:
+                sonic.enviar_seña(s)
+            sonic.reposo(1.2)
+        self._raiz.after(0, self._agregar_log,
+                         f"MuJoCo G1: ejecutada {' -> '.join(señas)}")
 
     def _enviar_al_robot(self, señas):
         """Ejecuta la secuencia en el G1, una seña tras otra (hilo aparte)."""
@@ -324,6 +379,7 @@ class VentanaVozASena:
 
     def _cerrar(self):
         log.info("Cerrando aplicacion...")
+        self.cerrar()
         self._raiz.quit()
         self._raiz.destroy()
 

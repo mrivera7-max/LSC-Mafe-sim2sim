@@ -20,7 +20,8 @@ lsc_bridge/
 │   └── capturar_muestras.py    ← Herramienta para construir el dataset
 │
 ├── robot/
-│   └── conector_g1.py          ← Integración SDK Unitree G1
+│   ├── conector_g1.py          ← Integración SDK Unitree G1
+│   └── conector_sonic.py       ← Voz/Texto → G1 en MuJoCo (29 GDL, política SONIC)
 │
 ├── gui/
 │   ├── ventana_principal.py    ← Ventana principal (Tkinter + OpenCV)
@@ -129,6 +130,10 @@ python main.py
 ---
 
 ## 🤖 Conexión al Unitree G1
+
+> **Voz/Texto → Seña en MuJoCo:** la pestaña de voz de `app_unificada.py` ejecuta las
+> señas en el G1 de 29 GDL con la política SONIC (sin Pico 4). Guía en
+> [`docs/sonic_mujoco.md`](docs/sonic_mujoco.md).
 
 El robot debe estar encendido y conectado a la misma red (ethernet o WiFi directo).
 
