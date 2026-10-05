@@ -1,0 +1,479 @@
+From 1d81d83405e8b288cf900ef06191a0f10314a3bf Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 29 Sep 2026 11:18:32 -0500
+Subject: [PATCH] =?UTF-8?q?C=C3=A1mara=20del=20G1=20f=C3=ADsico=20como=20f?=
+ =?UTF-8?q?uente=20del=20reconocimiento=20LSC=20(ZMQ,=20teleimager)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01KPXaB9faSBia4U7NFfYQrm
+---
+ app_unificada.py          |  13 +++
+ docs/camara_g1.md         | 124 +++++++++++++++++++++++++++
+ gui/ventana_principal.py  |  32 ++++---
+ robot/camara_g1.py        | 172 ++++++++++++++++++++++++++++++++++++++
+ robot/probar_camara_g1.py |  42 ++++++++++
+ utils/config.py           |   5 ++
+ 6 files changed, 377 insertions(+), 11 deletions(-)
+ create mode 100644 docs/camara_g1.md
+ create mode 100644 robot/camara_g1.py
+ create mode 100644 robot/probar_camara_g1.py
+
+diff --git a/app_unificada.py b/app_unificada.py
+index 511769f..e69cf42 100644
+--- a/app_unificada.py
++++ b/app_unificada.py
+@@ -117,6 +117,12 @@ def parsear_args():
+     p.add_argument("--v2", action="store_true",
+                    help="Usar reconocedor v2 (secuencial mano+cara, recomendado)")
+     p.add_argument("--camara", type=int, default=0, help="Índice de cámara")
++    p.add_argument("--camara-g1", nargs="?", const="192.168.123.164", metavar="IP",
++                   help="Usar la cámara de cabeza del G1 (teleimager-server) en lugar de la USB; IP del PC2 (default 192.168.123.164)")
++    p.add_argument("--camara-g1-puerto", type=int, default=None, metavar="N",
++                   help="Puerto ZMQ de la cámara en teleimager (default 55555; una cámara adicional suele ser 55556)")
++    p.add_argument("--camara-g1-mono", action="store_true",
++                   help="Forzar imagen de un solo lente (no recortar). Por defecto se detecta solo")
+     p.add_argument("--config", type=str, default="config.json")
+     p.add_argument("--log-nivel", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                    default="INFO")
+@@ -132,6 +138,13 @@ def main():
+ 
+     config = Configuracion(args.config)
+     config.camara_idx = args.camara
++    if args.camara_g1:
++        config.camara_fuente = "g1"
++        config.camara_g1_host = args.camara_g1
++        if args.camara_g1_puerto:
++            config.camara_g1_puerto = args.camara_g1_puerto
++        if args.camara_g1_mono:
++            config.camara_g1_binocular = False
+     config.robot_activo = not args.sin_robot
+     config.usar_v2 = args.v2 or config.usar_v2
+ 
+diff --git a/docs/camara_g1.md b/docs/camara_g1.md
+new file mode 100644
+index 0000000..46ec70e
+--- /dev/null
++++ b/docs/camara_g1.md
+@@ -0,0 +1,124 @@
++# Cámara del G1 físico como fuente del reconocimiento LSC
++
++La pestaña de cámara puede usar la cámara de cabeza del Unitree G1 en lugar de la USB.
++El robot la publica con `teleimager-server` (corre en su PC2); la app la lee por ZMQ con
++`pyzmq` + OpenCV, sin instalar teleimager en el entorno de la app.
++
++```
++G1 (PC2, 192.168.123.164)                        PC 5062robotika
++teleimager-server ── ZMQ PUB :55555 (JPEG) ─────▶ robot/camara_g1.py ─▶ reconocedor LSC
++                  └─ ZMQ REP :60000 (GET_DATA)
++```
++
++Si la imagen es estéreo (480×1280 = izquierda | derecha) se usa la mitad izquierda; las cámaras
++normales (RealSense 640×480, USB) se usan enteras. Se detecta solo por la proporción del frame. El reconocedor espeja la imagen como con la cámara USB.
++
++## Paso 0 — Dejar el servidor de imagen corriendo en el PC2 del robot
++
++Solo la primera vez. El servidor (`teleimager-server`) corre **en el robot**, porque la
++cámara de cabeza está cableada al PC2 (Jetson, ARM).
++
++1. Red: PC por cable al robot, IP `192.168.123.x`, robot encendido.
++   ```bash
++   ping -c 3 192.168.123.164
++   ssh unitree@192.168.123.164        # usuario/clave de fábrica de Unitree: unitree / 123 (usa la tuya si la cambiaste)
++   ```
++2. ¿Ya está instalado?
++   ```bash
++   conda env list | grep -i teleimager ; which teleimager-server
++   ```
++   Si aparece, salta al punto 4.
++3. Instalación (según el README de teleimager; el PC2 necesita salida a internet para `git`/`pip`):
++   ```bash
++   mkdir -p ~/miniconda3
++   wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-aarch64.sh -O ~/miniconda3/miniconda.sh
++   bash ~/miniconda3/miniconda.sh -b -u -p ~/miniconda3 && rm ~/miniconda3/miniconda.sh
++   source ~/miniconda3/bin/activate && conda init --all
++   conda create -n teleimager python=3.10 -y && conda activate teleimager
++   sudo apt install -y libusb-1.0-0-dev libturbojpeg-dev
++   git clone https://github.com/unitreerobotics/teleimager.git && cd teleimager
++   pip install -e ".[server]"
++   bash setup_uvc.sh                  # permisos de /dev/video*
++   ```
++   Si el PC2 no tiene internet, descarga el repositorio y los paquetes en la PC y cópialos con `scp`.
++4. Descubrir la cámara y configurar:
++   ```bash
++   conda activate teleimager && cd ~/teleimager
++   teleimager-server --cf --rs        # lista video_id / serial_number / resoluciones (RealSense incluida)
++   nano cam_config_server.yaml
++   ```
++   En `head_camera` deja `enable_zmq: true`, `zmq_port: 55555`, `enable_webrtc: false` y rellena
++   `type`, `image_shape`, `binocular`, `fps` y `video_id`/`serial_number` con lo descubierto.
++   Si la cámara es **estéreo** (imagen `[480, 1280]`), `binocular: true`; si es una sola
++   cámara, `binocular: false` **y** en la app `camara_g1_binocular: false`.
++5. Arrancar (deja esa terminal abierta):
++   ```bash
++   teleimager-server --rs             # sin --rs si la cámara no es RealSense
++   ```
++   Debe decir `head_camera is ready` y `ZMQ: enabled, zmq port=55555`.
++6. Opcional, arranque automático al encender el robot: `bash setup_autostart.sh`.
++
++Solo un proceso puede usar la cámara a la vez: si `xr_teleoperate` o `teleop_hand_and_arm.py`
++están corriendo, ciérralos.
++
++## Requisitos
++
++1. PC y robot en la misma red (`192.168.123.x`) y el G1 encendido.
++2. `teleimager-server` corriendo en el PC2 (paso 0), con `head_camera.enable_zmq: true` y `zmq_port: 55555`.
++3. Puertos 55555 y 60000 alcanzables desde la PC.
++
++## Comprobación paso a paso
++
++```bash
++ping -c 3 192.168.123.164                    # 0% pérdida
++cd ~/LSC-Mafe && source venv/bin/activate
++python -m robot.probar_camara_g1             # o con otra IP: python -m robot.probar_camara_g1 192.168.123.164
++```
++
++Debe imprimir `OK: ~30 fps, frame 640x480 guardado en g1_frame.jpg`. Abre `g1_frame.jpg`
++para ver lo que ve el reconocedor.
++
++## Usar la cámara del G1 en la app
++
++```bash
++python app_unificada.py --sin-robot --v2 --camara-g1                    # IP por defecto
++python app_unificada.py --sin-robot --v2 --camara-g1 192.168.123.164    # IP explícita
++```
++
++En `config.json` se puede dejar fijo: `"camara_fuente": "g1"`, `"camara_g1_host"`,
++`"camara_g1_puerto"` y `"camara_g1_binocular"`. Con `"camara_fuente": "usb"` (por defecto)
++se usa `camara_idx` como siempre.
++
++## Problemas frecuentes
++
++| Síntoma | Causa | Solución |
++|---|---|---|
++| `No llegan imágenes de ...:55555` | El servidor de imagen no corre en el PC2, o no hay red | `ping`; por SSH al PC2 arrancar `teleimager-server` y ver `head_camera is ready` |
++| `Sin respuesta de configuración ... :60000` (aviso) | Puerto de configuración cerrado | No impide el video; revisar firewall si se quiere ver la config |
++| Imagen fija o retrasada | Otro cliente saturando el PC2 (Pico, otra app) | Cerrar otros clientes |
++| Se ve la imagen pero no reconoce | Iluminación o distancia distinta a la del entrenamiento | Colocarse frente a la cámara a ~1 m, con luz frontal |
++| Dos imágenes lado a lado | `camara_g1_binocular` en `false` | Ponerlo en `true` |
++
++## Cámara adicional con mejor ángulo
++
++La cámara de cabeza del G1 apunta hacia abajo y puede no servir para ver las señas. Dos opciones:
++
++**A. USB directa a la PC (la más simple, no toca el robot).** Pon la cámara en un trípode a la
++altura de la cabeza del robot, apuntando a quien hace la seña, y conéctala a la PC:
++```bash
++ls /dev/video*                     # cada cámara USB crea 2 nodos (video0/video1, video2/video3...)
++v4l2-ctl --list-devices            # nombre de cada cámara (sudo apt install v4l-utils)
++python app_unificada.py --sin-robot --v2 --camara 2     # el número es el índice del dispositivo
++```
++El índice para OpenCV suele ser el primero de cada pareja (0, 2, 4…). Si no abre, prueba con otro.
++
++**B. USB al PC2 del robot como cámara adicional de teleimager.** Sirve si la cámara va montada
++en el robot y el cable llega al PC2. En `cam_config_server.yaml` del PC2 activa otra entrada
++(por ejemplo `left_wrist_camera`) con `enable_zmq: true`, `zmq_port: 55556`,
++`binocular: false`, su `video_id` y `image_shape: [480, 640]`, y reinicia `teleimager-server`.
++Desde la PC:
++```bash
++python -m robot.probar_camara_g1 192.168.123.164 55556
++python app_unificada.py --sin-robot --v2 --camara-g1 --camara-g1-puerto 55556 --camara-g1-mono
++```
++Cada cámara del servidor usa su propio puerto ZMQ (55555 cabeza, 55556, 55557…).
+diff --git a/gui/ventana_principal.py b/gui/ventana_principal.py
+index 47711fc..b3ad661 100644
+--- a/gui/ventana_principal.py
++++ b/gui/ventana_principal.py
+@@ -394,16 +394,26 @@ class VentanaPrincipal:
+ 
+     def _iniciar_camara(self):
+         import cv2
+-        self._cap = cv2.VideoCapture(self.config.camara_idx)
+-        if not self._cap.isOpened():
+-            messagebox.showerror("Error de cámara",
+-                                 f"No se pudo abrir la cámara {self.config.camara_idx}.\n"
+-                                 "Verifica que esté conectada.")
+-            return
+-
+-        self._cap.set(cv2.CAP_PROP_FRAME_WIDTH,  self.config.camara_ancho)
+-        self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.camara_alto)
+-        self._cap.set(cv2.CAP_PROP_FPS,          self.config.camara_fps)
++        if getattr(self.config, "camara_fuente", "usb") == "g1":
++            from robot.camara_g1 import CamaraG1
++            self._cap = CamaraG1(self.config.camara_g1_host, self.config.camara_g1_puerto,
++                                 binocular=self.config.camara_g1_binocular)
++            if not self._cap.isOpened():
++                messagebox.showerror("Cámara del G1", self._cap.error or "No se pudo abrir la cámara del G1.")
++                self._cap = None
++                return
++            nombre_cam = f"del G1 ({self.config.camara_g1_host})"
++        else:
++            self._cap = cv2.VideoCapture(self.config.camara_idx)
++            if not self._cap.isOpened():
++                messagebox.showerror("Error de cámara",
++                                     f"No se pudo abrir la cámara {self.config.camara_idx}.\n"
++                                     "Verifica que esté conectada.")
++                return
++            self._cap.set(cv2.CAP_PROP_FRAME_WIDTH,  self.config.camara_ancho)
++            self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.camara_alto)
++            self._cap.set(cv2.CAP_PROP_FPS,          self.config.camara_fps)
++            nombre_cam = str(self.config.camara_idx)
+ 
+         if not self._reconocedor.iniciar():
+             messagebox.showerror("Error de modelo",
+@@ -414,7 +424,7 @@ class VentanaPrincipal:
+         self._hilo_camara = threading.Thread(target=self._bucle_camara, daemon=True)
+         self._hilo_camara.start()
+         self._actualizar_video()
+-        log.info(f"Cámara {self.config.camara_idx} iniciada")
++        log.info(f"Cámara {nombre_cam} iniciada")
+ 
+     def _detener_camara(self):
+         self._activa = False
+diff --git a/robot/camara_g1.py b/robot/camara_g1.py
+new file mode 100644
+index 0000000..886b05e
+--- /dev/null
++++ b/robot/camara_g1.py
+@@ -0,0 +1,172 @@
++"""
++camara_g1.py — cámara de cabeza del Unitree G1 como fuente de video para LSC.
++
++El G1 publica su cámara con `teleimager-server` (corre en el PC2 del robot,
++normalmente 192.168.123.164). Protocolo (teleimager/client.py):
++
++    ZMQ PUB/SUB   tcp://<host>:55555   mensajes = bytes JPEG crudos (sin cabecera)
++    ZMQ REQ/REP   tcp://<host>:60000   b"GET_DATA" -> JSON con la configuración
++
++Este módulo lo lee solo con pyzmq + OpenCV (ya instalados en el venv de la app),
++sin instalar teleimager. Expone la misma interfaz mínima que cv2.VideoCapture
++(isOpened / read / set / release) para poder sustituirla en el panel de cámara.
++
++La cámara de cabeza del G1 es estéreo (imagen [480, 1280] = izq | der). El
++reconocedor necesita una sola vista, así que por defecto se recorta la mitad
++izquierda.
++"""
++
++import logging
++import threading
++import time
++from typing import Optional, Tuple
++
++import numpy as np
++
++try:
++    import zmq
++except ImportError:
++    zmq = None
++
++try:
++    import cv2
++except ImportError:
++    cv2 = None
++
++log = logging.getLogger("lsc_bridge.camara_g1")
++
++PUERTO_ZMQ = 55555
++PUERTO_CONFIG = 60000
++
++
++def pedir_configuracion(host: str, puerto: int = PUERTO_CONFIG, timeout_ms: int = 2000) -> Optional[dict]:
++    """Pide al servidor de imagen su configuración (cámaras, puertos, tamaños)."""
++    if zmq is None:
++        return None
++    ctx = zmq.Context.instance()
++    sock = ctx.socket(zmq.REQ)
++    sock.setsockopt(zmq.LINGER, 0)
++    try:
++        sock.connect(f"tcp://{host}:{puerto}")
++        sock.send(b"GET_DATA")
++        if sock.poll(timeout_ms):
++            return sock.recv_json()
++    except Exception as e:  # noqa: BLE001
++        log.debug(f"GET_DATA falló: {e}")
++    finally:
++        sock.close(0)
++    return None
++
++
++class CamaraG1:
++    """Fuente de video con interfaz de cv2.VideoCapture, alimentada por ZMQ."""
++
++    def __init__(self, host: str = "192.168.123.164", puerto: int = PUERTO_ZMQ,
++                 binocular: Optional[bool] = None, vista: str = "izq", espera_s: float = 5.0):
++        """
++        host       IP del PC2 del robot (o de la PC que corre teleimager-server).
++        binocular  True: recortar la mitad (imagen estéreo izq | der). False: usar la imagen entera.
++                   None (por defecto): automático, se recorta solo si el frame es muy ancho
++                   (ancho/alto >= 2.4, p. ej. 1280x480); la RealSense y las USB normales no se recortan.
++        vista      "izq" o "der": mitad que se entrega cuando binocular=True.
++        espera_s   segundos que se espera el primer frame antes de dar la cámara por caída.
++        """
++        self.host, self.puerto = host, puerto
++        self.binocular, self.vista = binocular, vista
++        self.error: Optional[str] = None
++
++        self._ctx = None
++        self._sock = None
++        self._hilo: Optional[threading.Thread] = None
++        self._activo = threading.Event()
++        self._lock = threading.Lock()
++        self._frame: Optional[np.ndarray] = None
++        self._n = 0               # frames recibidos
++        self._n_leidos = 0        # último frame entregado a read()
++        self._t_ultimo = 0.0
++        self._abrir(espera_s)
++
++    # ── Interfaz tipo cv2.VideoCapture ────────────────────────────────
++    def isOpened(self) -> bool:
++        return self._activo.is_set()
++
++    def read(self) -> Tuple[bool, Optional[np.ndarray]]:
++        """Bloquea hasta que haya un frame nuevo (máx. 1 s) y lo devuelve."""
++        t0 = time.monotonic()
++        while self._activo.is_set():
++            with self._lock:
++                if self._frame is not None and self._n != self._n_leidos:
++                    self._n_leidos = self._n
++                    return True, self._frame.copy()
++            if time.monotonic() - t0 > 1.0:
++                return False, None
++            time.sleep(0.005)
++        return False, None
++
++    def set(self, *_args) -> bool:      # cv2.VideoCapture.set: la resolución la fija el servidor
++        return False
++
++    def release(self):
++        self._activo.clear()
++        if self._hilo is not None and self._hilo is not threading.current_thread():
++            self._hilo.join(timeout=2.0)
++        if self._sock is not None:
++            self._sock.close(0)
++            self._sock = None
++        log.info("Cámara del G1 cerrada")
++
++    # ── Interno ───────────────────────────────────────────────────────
++    def _abrir(self, espera_s: float):
++        if zmq is None or cv2 is None:
++            self.error = "Faltan pyzmq u opencv (pip install pyzmq opencv-python)"
++            log.error(self.error)
++            return
++        cfg = pedir_configuracion(self.host)
++        if cfg:
++            log.info(f"teleimager en {self.host}: {cfg}")
++        else:
++            log.warning(f"Sin respuesta de configuración en {self.host}:{PUERTO_CONFIG} "
++                        "(se sigue con el puerto de video por defecto)")
++        self._ctx = zmq.Context.instance()
++        self._sock = self._ctx.socket(zmq.SUB)
++        self._sock.setsockopt(zmq.CONFLATE, 1)        # solo el frame más reciente
++        self._sock.setsockopt(zmq.RCVHWM, 1)
++        self._sock.setsockopt(zmq.RCVTIMEO, 500)
++        self._sock.setsockopt(zmq.LINGER, 0)
++        self._sock.setsockopt_string(zmq.SUBSCRIBE, "")
++        self._sock.connect(f"tcp://{self.host}:{self.puerto}")
++        self._activo.set()
++        self._hilo = threading.Thread(target=self._bucle, name="camara-g1", daemon=True)
++        self._hilo.start()
++
++        t0 = time.monotonic()
++        while time.monotonic() - t0 < espera_s:
++            if self._n > 0:
++                log.info(f"Cámara del G1 conectada ({self.host}:{self.puerto}), "
++                         f"frame {self._frame.shape[1]}x{self._frame.shape[0]}")
++                return
++            time.sleep(0.05)
++        self.error = (f"No llegan imágenes de {self.host}:{self.puerto}. Revisa que el robot esté "
++                      "encendido, en la misma red y con teleimager-server corriendo en el PC2.")
++        log.error(self.error)
++        self._activo.clear()
++
++    def _bucle(self):
++        while self._activo.is_set():
++            try:
++                jpg = self._sock.recv()
++            except zmq.Again:
++                continue
++            except zmq.ZMQError:
++                break
++            img = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
++            if img is None:
++                continue
++            estereo = self.binocular if self.binocular is not None else (img.shape[1] / img.shape[0] >= 2.4)
++            if estereo:
++                mitad = img.shape[1] // 2
++                img = img[:, :mitad] if self.vista == "izq" else img[:, mitad:]
++            with self._lock:
++                self._frame = img
++                self._n += 1
++                self._t_ultimo = time.monotonic()
+diff --git a/robot/probar_camara_g1.py b/robot/probar_camara_g1.py
+new file mode 100644
+index 0000000..00ee6ad
+--- /dev/null
++++ b/robot/probar_camara_g1.py
+@@ -0,0 +1,42 @@
++"""
++probar_camara_g1.py — comprueba la cámara de cabeza del G1 sin abrir la GUI.
++
++    python -m robot.probar_camara_g1 [IP] [PUERTO]   # IP del PC2 (def. 192.168.123.164) y puerto ZMQ (def. 55555)
++    # cámara externa publicada como left_wrist_camera: python -m robot.probar_camara_g1 192.168.123.164 55556
++
++Muestra la configuración que publica teleimager, mide los fps y guarda un frame en
++`g1_frame.jpg` (vista izquierda, la misma que ve el reconocedor).
++"""
++import logging
++import sys
++import time
++
++import cv2
++
++from robot.camara_g1 import CamaraG1
++
++
++def main(args):
++    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
++    host = args[0] if args else "192.168.123.164"
++    puerto = int(args[1]) if len(args) > 1 else 55555
++    cam = CamaraG1(host, puerto)
++    if not cam.isOpened():
++        print("ERROR:", cam.error)
++        return 1
++    n, t0, ultimo = 0, time.monotonic(), None
++    while time.monotonic() - t0 < 3.0:
++        ok, f = cam.read()
++        if ok:
++            n, ultimo = n + 1, f
++    cam.release()
++    if ultimo is None:
++        print("ERROR: no llegaron frames")
++        return 1
++    cv2.imwrite("g1_frame.jpg", ultimo)
++    print(f"OK: {n / 3.0:.1f} fps, frame {ultimo.shape[1]}x{ultimo.shape[0]} guardado en g1_frame.jpg")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main(sys.argv[1:]))
+diff --git a/utils/config.py b/utils/config.py
+index f6c76e0..808afd0 100644
+--- a/utils/config.py
++++ b/utils/config.py
+@@ -18,6 +18,11 @@ class Configuracion:
+         self.camara_ancho = 1280
+         self.camara_alto = 720
+         self.camara_fps = 30
++        # Fuente de video: "usb" (cv2.VideoCapture) o "g1" (cámara de cabeza del robot por ZMQ)
++        self.camara_fuente = "usb"
++        self.camara_g1_host = "192.168.123.164"   # PC2 del G1 (teleimager-server)
++        self.camara_g1_puerto = 55555
++        self.camara_g1_binocular = None           # None = automático (recorta solo si la imagen es estéreo); True/False fuerza
+ 
+         # Modelo
+         self.modelo_tipo = "mediapipe"
+-- 
+2.43.0
+

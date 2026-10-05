@@ -1,0 +1,529 @@
+From 3e47096883545133dfa621a7eb3b1ecec48f0bd9 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 5 Oct 2026 10:12:31 -0500
+Subject: [PATCH] =?UTF-8?q?App:=20botones=20=C2=ABAbrir=20simulaci=C3=B3n?=
+ =?UTF-8?q?=20MuJoCo=C2=BB=20y=20=C2=ABConectar=20robot=20real=C2=BB=20que?=
+ =?UTF-8?q?=20abren=20el=20deploy=20y=20enlazan?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01KPXaB9faSBia4U7NFfYQrm
+---
+ app_unificada.py            |  15 +--
+ docs/g1_real.md             |  20 ++++
+ robot/lanzador_sonic.py     | 151 ++++++++++++++++++++++++++++++
+ voz_a_sena/gui_principal.py | 179 +++++++++++++++++++++++++++++-------
+ 4 files changed, 325 insertions(+), 40 deletions(-)
+ create mode 100644 robot/lanzador_sonic.py
+
+diff --git a/app_unificada.py b/app_unificada.py
+index 3d612a2..98b4b07 100644
+--- a/app_unificada.py
++++ b/app_unificada.py
+@@ -139,9 +139,14 @@ def parsear_args():
+                    help="Confianza mínima de la seña detectada por cámara para que el G1 la ejecute (default 0.8)")
+     p.add_argument("--mic", choices=["auto", "pc", "g1"], default="auto",
+                    help="Micrófono de voz: g1 = robot (multicast), pc = esta PC, "
+-                        "auto = G1 con --sonic-real/--camara-g1 (con respaldo a la PC), si no PC")
++                        "auto = G1 al usar el robot real (con respaldo a la PC), PC en simulación")
+     p.add_argument("--mic-g1-ip", default=None, metavar="IP",
+                    help="IP de esta PC en la red del robot (192.168.123.x) para recibir el audio")
++    p.add_argument("--gr00t-dir", default=None, metavar="RUTA",
++                   help="Carpeta GR00T-WholeBodyControl (para abrir MuJoCo/deploy desde la app). "
++                        "También vale la variable GR00T_DIR")
++    p.add_argument("--iface", default=None, metavar="NOMBRE",
++                   help="Interfaz de red cableada del robot para el deploy real (defecto enp131s0)")
+     p.add_argument("--config", type=str, default="config.json")
+     p.add_argument("--log-nivel", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                    default="INFO")
+@@ -174,11 +179,9 @@ def main():
+     sonic_opciones = dict(modo_real=args.sonic_real, escala=args.sonic_escala,
+                           factor_tiempo=args.sonic_tiempo, vel_max=args.sonic_vel_max,
+                           confianza_min=args.sonic_confianza)
+-    mic = args.mic
+-    if mic == "auto" and not (args.sonic_real or args.camara_g1):
+-        mic = "pc"
+-    sonic_opciones.update(mic=mic, mic_iface_ip=args.mic_g1_ip)
+-    log.info(f"Micrófono de voz: {mic}")
++    sonic_opciones.update(mic=args.mic, mic_iface_ip=args.mic_g1_ip,
++                          gr00t_dir=args.gr00t_dir, interfaz=args.iface)
++    log.info(f"Micrófono de voz: {args.mic} (auto = G1 con robot real, PC con simulación)")
+     app = AppUnificada(config, sonic_opciones)
+     app.ejecutar()
+ 
+diff --git a/docs/g1_real.md b/docs/g1_real.md
+index 80ab852..025dd0a 100644
+--- a/docs/g1_real.md
++++ b/docs/g1_real.md
+@@ -145,3 +145,23 @@ Notas: el formato del audio del G1 proviene de proyectos de terceros (no de la d
+ oficial) y la recepción en una PC externa no está verificada; si `probar_microfono g1` da 0
+ paquetes, revisar cable/IP en 192.168.123.x y firewall UDP 5555. El reconocimiento (Google)
+ requiere internet.
++
++## Arranque con los botones de la app (simulación o robot real)
++
++La pestaña **Voz / Texto → Seña** tiene dos botones y ya no hace falta abrir a mano las
++terminales del deploy ni de MuJoCo:
++
++- **🖥 Abrir simulación MuJoCo**: abre MuJoCo (T1) y el deploy `sim` (T2) en terminales, espera
++  «Init done» y enlaza solo. Después sueltas al G1 con `7` ×2 y `9` en la ventana de MuJoCo.
++- **🤖 Conectar robot real**: pide confirmar, abre el deploy con la interfaz del cable
++  (`enp131s0`; cámbiala con `--iface`), esperas a «Init done» (confirmas en esa terminal) y la app
++  muestra el checklist de seguridad antes de enviar START. El micrófono pasa al del G1.
++
++Si el botón dice **▶ Enlazar …**, el deploy ya está abierto y solo falta conectar. **■ Desconectar**
++corta el enlace sin cerrar las terminales. Tras **■ PARAR** hay que cerrar la terminal del deploy y
++volver a pulsar el botón.
++
++Ruta del repositorio GR00T: `--gr00t-dir RUTA` o variable `GR00T_DIR` (por defecto
++`/home/udirobotika/DURVVIN/SIM2SIM/blea/GR00T-WholeBodyControl`). Requiere `gnome-terminal`
++(o xterm/konsole) y el comando `script`. Si no se puede abrir una terminal, la app escribe en el
++registro los comandos para ejecutarlos a mano.
+diff --git a/robot/lanzador_sonic.py b/robot/lanzador_sonic.py
+new file mode 100644
+index 0000000..f4f3ee1
+--- /dev/null
++++ b/robot/lanzador_sonic.py
+@@ -0,0 +1,151 @@
++"""
++Abre desde la app la simulación MuJoCo y/o el deploy SONIC en terminales visibles.
++
++Equivale a las Terminales 1 y 2 de docs/sonic_mujoco.md y docs/g1_real.md:
++
++  simulación : run_sim_loop.py (MuJoCo)  +  ./deploy.sh --input-type zmq_manager sim
++  robot real : ./deploy.sh --input-type zmq_manager <interfaz>      (sin MuJoCo)
++
++Las terminales quedan abiertas para que se vean los avisos y se pueda pulsar O (paro).
++La salida del deploy se registra con `script` para saber cuándo aparece «Init done».
++"""
++
++import logging
++import os
++import re
++import shlex
++import shutil
++import subprocess
++from pathlib import Path
++from typing import List, Optional
++
++log = logging.getLogger("robot.lanzador_sonic")
++
++DIR_DEFECTO = "/home/udirobotika/DURVVIN/SIM2SIM/blea/GR00T-WholeBodyControl"
++INTERFAZ_DEFECTO = "enp131s0"
++ESPERA_DEPLOY_SIM_S = 8          # el deploy necesita que MuJoCo ya publique LowState
++DIR_LOGS = Path.home() / ".cache" / "lsc-mafe"
++_INIT_DONE = re.compile(r"init\s*done", re.IGNORECASE)
++_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
++
++
++class LanzadorSonic:
++    def __init__(self, directorio: Optional[str] = None, interfaz: Optional[str] = None):
++        self.directorio = Path(directorio or os.environ.get("GR00T_DIR") or DIR_DEFECTO).expanduser()
++        self.interfaz = interfaz or INTERFAZ_DEFECTO
++        self.error: Optional[str] = None
++
++    # ── Comprobaciones y comandos ────────────────────────────────────
++    def validar(self) -> Optional[str]:
++        """None si todo está; si no, el motivo (con la opción para corregirlo)."""
++        d = self.directorio
++        if not (d / "gear_sonic_deploy" / "deploy.sh").exists():
++            return (f"No encuentro gear_sonic_deploy/deploy.sh en {d}. "
++                    "Indica la carpeta con --gr00t-dir o la variable GR00T_DIR.")
++        return None
++
++    def _venv(self) -> Optional[Path]:
++        pref = self.directorio / ".venv_teleop"
++        if (pref / "bin" / "activate").exists():
++            return pref
++        for c in sorted(self.directorio.glob(".venv*")):
++            if (c / "bin" / "activate").exists():
++                return c
++        return None
++
++    def comando_sim(self) -> str:
++        venv = self._venv()
++        if venv is None:
++            raise RuntimeError(f"No hay entorno .venv* en {self.directorio} (el de gear_sonic_teleop).")
++        return (f"cd {shlex.quote(str(self.directorio))} && "
++                f"source {shlex.quote(str(venv / 'bin' / 'activate'))} && "
++                "python gear_sonic/scripts/run_sim_loop.py")
++
++    def comando_deploy(self, real: bool) -> str:
++        destino = self.interfaz if real else "sim"
++        previo = "" if real else f"echo 'Esperando {ESPERA_DEPLOY_SIM_S} s a que MuJoCo abra...'; sleep {ESPERA_DEPLOY_SIM_S}; "
++        return (previo + f"cd {shlex.quote(str(self.directorio / 'gear_sonic_deploy'))} && "
++                "source scripts/setup_env.sh && "
++                f"./deploy.sh --input-type zmq_manager {shlex.quote(destino)}")
++
++    # ── Terminales ───────────────────────────────────────────────────
++    @staticmethod
++    def _argv_terminal(titulo: str, cmd: str) -> Optional[List[str]]:
++        bash = ["bash", "-lc", cmd]
++        if shutil.which("gnome-terminal"):
++            return ["gnome-terminal", "--title", titulo, "--"] + bash
++        if shutil.which("x-terminal-emulator"):
++            return ["x-terminal-emulator", "-e"] + bash
++        if shutil.which("konsole"):
++            return ["konsole", "-p", f"tabtitle={titulo}", "-e"] + bash
++        if shutil.which("xfce4-terminal"):
++            return ["xfce4-terminal", "--title", titulo, "-x"] + bash
++        if shutil.which("xterm"):
++            return ["xterm", "-T", titulo, "-e"] + bash
++        return None
++
++    def ruta_log(self, nombre: str) -> Path:
++        return DIR_LOGS / f"{nombre}.log"
++
++    def abrir_terminal(self, titulo: str, comando: str, log_nombre: Optional[str] = None) -> bool:
++        """Abre una terminal que ejecuta `comando` y se queda abierta al terminar."""
++        interior = comando
++        if log_nombre and shutil.which("script"):
++            DIR_LOGS.mkdir(parents=True, exist_ok=True)
++            ruta = self.ruta_log(log_nombre)
++            ruta.write_text("")
++            # `script` conserva el terminal (pty): los avisos y la tecla O siguen funcionando
++            interior = f"script -qf -c {shlex.quote(comando)} {shlex.quote(str(ruta))}"
++        completo = f"{interior}; echo; echo '[proceso terminado — cierra esta ventana]'; exec bash"
++        argv = self._argv_terminal(titulo, completo)
++        if argv is None:
++            self.error = "No hay emulador de terminal (gnome-terminal, xterm, konsole...)."
++            return False
++        try:
++            subprocess.Popen(argv, start_new_session=True,
++                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
++            return True
++        except OSError as e:
++            self.error = f"No se pudo abrir la terminal: {e}"
++            return False
++
++    def lanzar(self, real: bool) -> bool:
++        """Simulación: MuJoCo + deploy sim. Real: solo deploy real."""
++        self.error = None
++        msg = self.validar()
++        if msg:
++            self.error = msg
++            return False
++        try:
++            if not real:
++                if not self.abrir_terminal("LSC · MuJoCo (T1)", self.comando_sim()):
++                    return False
++            return self.abrir_terminal(
++                "LSC · Deploy SONIC " + ("REAL" if real else "sim") + " (T2)",
++                self.comando_deploy(real), log_nombre="deploy_real" if real else "deploy_sim")
++        except RuntimeError as e:
++            self.error = str(e)
++            return False
++
++    def comandos_manuales(self, real: bool) -> str:
++        """Texto con los comandos, por si no se puede abrir terminal."""
++        partes = []
++        try:
++            if not real:
++                partes.append("Terminal 1:  " + self.comando_sim())
++        except RuntimeError as e:
++            partes.append(f"Terminal 1: {e}")
++        partes.append("Terminal 2:  " + self.comando_deploy(real))
++        return "\n".join(partes)
++
++    def deploy_listo(self, real: bool) -> bool:
++        """True si el log del deploy ya muestra «Init done»."""
++        ruta = self.ruta_log("deploy_real" if real else "deploy_sim")
++        try:
++            texto = _ANSI.sub("", ruta.read_text(errors="ignore"))
++        except OSError:
++            return False
++        return bool(_INIT_DONE.search(texto))
++
++    def hay_log(self, real: bool) -> bool:
++        return shutil.which("script") is not None
+diff --git a/voz_a_sena/gui_principal.py b/voz_a_sena/gui_principal.py
+index f48b9c3..12b2295 100644
+--- a/voz_a_sena/gui_principal.py
++++ b/voz_a_sena/gui_principal.py
+@@ -19,6 +19,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
+ from utils.logger import configurar_logger
+ from voz_a_sena.servidor import ServidorVozASena
+ from robot.conector_sonic import ConectorSonic
++from robot.lanzador_sonic import LanzadorSonic
++from voz_a_sena.reconocimiento_voz import ReconocedorVoz
+ 
+ log = logging.getLogger("voz_a_sena.gui")
+ 
+@@ -28,7 +30,8 @@ class VentanaVozASena:
+ 
+     def __init__(self, modo_real: bool = False, escala=None, factor_tiempo=None,
+                  vel_max=None, confianza_min: float = 0.8,
+-                 mic: str = "pc", mic_iface_ip: str = None):
++                 mic: str = "pc", mic_iface_ip: str = None,
++                 gr00t_dir: str = None, interfaz: str = None):
+         """
+         modo_real      True: el deploy SONIC mueve el G1 FÍSICO (no MuJoCo). Exige confirmar
+                        el checklist de seguridad y limita amplitud y velocidad de las señas.
+@@ -41,11 +44,15 @@ class VentanaVozASena:
+         self._opciones_sonic = dict(escala=escala, factor_tiempo=factor_tiempo, vel_max=vel_max)
+         self.confianza_min = confianza_min
+         self.mic = mic
++        self._mic_iface_ip = mic_iface_ip
++        self.lanzador = LanzadorSonic(gr00t_dir, interfaz)
++        self._lanzado = {False: False, True: False}   # ¿ya se abrió la sim / el deploy real?
++        self._esperando = False
+         self.servidor = ServidorVozASena(
+-            fuente_mic="pc" if mic == "pc" else "g1",
+-            mic_fallback_pc=(mic == "auto"), mic_iface_ip=mic_iface_ip)
++            fuente_mic="g1" if mic == "g1" else "pc",
++            mic_fallback_pc=False, mic_iface_ip=mic_iface_ip)
+         self.robot = None  # ConectorG1 compartido; lo asigna app_unificada.py
+-        self.sonic = None  # ConectorSonic (MuJoCo, 29 GDL); se crea al pulsar «Conectar MuJoCo»
++        self.sonic = None  # ConectorSonic (MuJoCo, 29 GDL); se crea al enlazar con la simulación o el robot real
+         self._raiz = None
+         self._contenedor = None
+         self._escuchando = False
+@@ -70,7 +77,7 @@ class VentanaVozASena:
+         compartiendo la raíz de la app unificada. No crea tk.Tk() ni mainloop.
+ 
+         Ya no se levanta el servidor HTTP/WebSocket del visor 3D del navegador:
+-        las señas se ejecutan en MuJoCo (botón «Conectar MuJoCo G1»).
++        las señas se ejecutan en MuJoCo (botón «Abrir simulación MuJoCo»).
+         """
+         self._raiz = raiz
+         self._contenedor = contenedor
+@@ -83,13 +90,18 @@ class VentanaVozASena:
+         return "G1 real" if self.modo_real else "MuJoCo G1"
+ 
+     def _agregar_log_inicial(self):
+-        if self.modo_real:
+-            self._agregar_log("MODO G1 REAL. Sigue docs/g1_real.md: robot en arnés, deploy con "
+-                              "'real', y alguien con la mano en la tecla O. "
+-                              "Luego pulsa «▶ Conectar G1 real».")
+-        else:
+-            self._agregar_log("Arranca MuJoCo y el deploy SONIC (docs/sonic_mujoco.md) "
+-                              "y pulsa «▶ Conectar MuJoCo G1».")
++        self._agregar_log("Pulsa «🖥 Abrir simulación MuJoCo» para practicar sin riesgo, o "
++                          "«🤖 Conectar robot real» para mover el G1 físico (docs/g1_real.md).")
++
++    def _ajustar_mic(self):
++        """Con --mic auto: micrófono del G1 si se trabaja con el robot real, si no el de la PC."""
++        if self.mic != "auto":
++            return
++        fuente = "g1" if self.modo_real else "pc"
++        self.servidor.reconocedor_voz = ReconocedorVoz(
++            fuente=fuente, fallback_pc=True, iface_ip=self._mic_iface_ip)
++        self._boton_voz.configure(text=self._texto_boton_voz())
++        self._agregar_log(f"Micrófono de voz: {'del G1' if fuente == 'g1' else 'de la PC'}.")
+ 
+     def cerrar(self):
+         """Cierra la conexión con MuJoCo sin destruir la raíz."""
+@@ -102,18 +114,100 @@ class VentanaVozASena:
+ 
+     # ── Conexión con MuJoCo (SONIC) ──────────────────────────────────
+ 
+-    def _alternar_sonic(self):
+-        if self._conectando_sonic:
++    def _conectado(self) -> bool:
++        return self.sonic is not None and self.sonic.conectado
++
++    def _refrescar_botones(self):
++        """Rotula los botones según lo que ya está abierto y si hay conexión."""
++        conectado = self._conectado() or self._conectando_sonic
++        busy = conectado or self._esperando
++        self._boton_sim.configure(
++            text="▶ Enlazar simulación" if self._lanzado[False] else "🖥 Abrir simulación MuJoCo",
++            state="disabled" if busy else "normal")
++        self._boton_real.configure(
++            text="▶ Enlazar robot real" if self._lanzado[True] else "🤖 Conectar robot real",
++            state="disabled" if busy else "normal")
++        self._boton_sonic.configure(state="normal" if self._conectado() else "disabled")
++
++    def _pulsar(self, real: bool):
++        """Botón de simulación (real=False) o de robot real (real=True)."""
++        if self._conectando_sonic or self._esperando or self._conectado():
+             return
+-        if self.sonic is not None and self.sonic.conectado:
+-            threading.Thread(target=self._desconectar_sonic, daemon=True).start()
+-        else:
+-            if self.modo_real and not self._confirmar_robot_real():
+-                self._agregar_log("Conexión con el G1 real cancelada.")
++        self.modo_real = real
++        self._ajustar_mic()
++        destino = self._nombre_destino
++        if not self._lanzado[real]:
++            if real and not messagebox.askokcancel(
++                    "Robot real",
++                    "Se abrirá el deploy SONIC en modo REAL "
++                    f"(interfaz {self.lanzador.interfaz}).\n\n"
++                    "El robot debe estar en el arnés, con espacio libre y la persona de la "
++                    "tecla O lista. En la terminal que se abra, confirma el deploy.\n"
++                    "Todavía NO se mueve nada: antes de enviar START se pedirá otra confirmación.",
++                    icon="warning", parent=self._raiz):
++                self._agregar_log("Robot real cancelado.")
++                return
++            if not self.lanzador.lanzar(real):
++                self._agregar_log(f"[ERROR] {self.lanzador.error}")
++                self._agregar_log("Ábrelo a mano con estos comandos y luego pulsa de nuevo el botón:\n"
++                                  + self.lanzador.comandos_manuales(real))
++                self._lanzado[real] = True   # el siguiente clic solo enlaza
++                self._refrescar_botones()
+                 return
+-            self._conectando_sonic = True
+-            self._boton_sonic.configure(state="disabled", text="Conectando…")
+-            threading.Thread(target=self._conectar_sonic, daemon=True).start()
++            self._lanzado[real] = True
++            self._esperando = True
++            self._refrescar_botones()
++            if self.lanzador.hay_log(real):
++                self._agregar_log(("Abierto el deploy REAL" if real else "Abiertos MuJoCo y el deploy")
++                                  + ". Si te pide confirmar, hazlo en esa terminal; "
++                                    "cuando termine de iniciar (Init done) se enlaza solo.")
++                self._lbl_sonic.configure(text="● Esperando «Init done»…", fg="#fde68a")
++                self._espera_ini = __import__("time").time()
++                self._sondear_deploy(real)
++            else:
++                self._esperando = False
++                self._refrescar_botones()
++                self._agregar_log("Cuando veas «Init done» en la terminal del deploy, pulsa «▶ Enlazar».")
++        else:
++            self._enlazar(real)
++
++    def _sondear_deploy(self, real: bool):
++        """Cada segundo mira el log del deploy hasta ver «Init done» (máx. 120 s)."""
++        import time
++        if not self._esperando:
++            return
++        if self.lanzador.deploy_listo(real):
++            self._esperando = False
++            self._agregar_log("Deploy listo (Init done).")
++            self._enlazar(real)
++        elif time.time() - self._espera_ini > 120:
++            self._esperando = False
++            self._lbl_sonic.configure(text=f"● {self._nombre_destino} sin conectar", fg="#bfdbfe")
++            self._refrescar_botones()
++            self._agregar_log("No vi «Init done» en 2 min. Revisa la terminal del deploy; "
++                              "si ya inició, pulsa «▶ Enlazar».")
++        else:
++            self._raiz.after(1000, self._sondear_deploy, real)
++
++    def _enlazar(self, real: bool):
++        """Conecta por ZMQ con el deploy ya iniciado (envía START)."""
++        self._esperando = False
++        self.modo_real = real
++        if real and not self._confirmar_robot_real():
++            self._agregar_log("Conexión con el G1 real cancelada (el deploy sigue abierto).")
++            self._lbl_sonic.configure(text=f"● {self._nombre_destino} sin conectar", fg="#bfdbfe")
++            self._refrescar_botones()
++            return
++        self._conectando_sonic = True
++        self._boton_sim.configure(state="disabled")
++        self._boton_real.configure(state="disabled")
++        self._lbl_sonic.configure(text="● Conectando…", fg="#fde68a")
++        threading.Thread(target=self._conectar_sonic, daemon=True).start()
++
++    def _alternar_sonic(self):
++        """Botón «Desconectar»."""
++        if self._conectado():
++            threading.Thread(target=self._desconectar_sonic, daemon=True).start()
+ 
+     def _confirmar_robot_real(self) -> bool:
+         """Checklist de seguridad antes de enviar `start` al deploy que mueve el G1 físico."""
+@@ -146,7 +240,7 @@ class VentanaVozASena:
+ 
+     def _sonic_listo(self):
+         self._conectando_sonic = False
+-        self._boton_sonic.configure(state="normal", text=f"■ Desconectar {self._nombre_destino}")
++        self._refrescar_botones()
+         self._lbl_sonic.configure(text=f"● {self._nombre_destino} conectado (:5556)", fg="#86efac")
+         self._boton_parar.configure(state="normal")
+         if self.modo_real:
+@@ -160,12 +254,13 @@ class VentanaVozASena:
+ 
+     def _sonic_fallo(self, mensaje: str):
+         self._conectando_sonic = False
+-        self._boton_sonic.configure(state="normal", text=f"▶ Conectar {self._nombre_destino}")
++        self._refrescar_botones()
+         self._lbl_sonic.configure(text=f"● {self._nombre_destino} sin conectar", fg="#bfdbfe")
+-        self._agregar_log(f"[ERROR] No se pudo conectar: {mensaje}")
++        self._agregar_log(f"[ERROR] No se pudo conectar: {mensaje}  (¿el deploy está en «Init done»? "
++                          "Pulsa de nuevo el botón.)")
+ 
+     def _sonic_desconectado(self):
+-        self._boton_sonic.configure(state="normal", text=f"▶ Conectar {self._nombre_destino}")
++        self._refrescar_botones()
+         self._lbl_sonic.configure(text=f"● {self._nombre_destino} sin conectar", fg="#bfdbfe")
+         self._boton_parar.configure(state="disabled")
+         self._agregar_log(f"{self._nombre_destino} desconectado.")
+@@ -178,8 +273,9 @@ class VentanaVozASena:
+         threading.Thread(target=sonic.parada_emergencia, daemon=True).start()
+         self._boton_parar.configure(state="disabled")
+         self._lbl_sonic.configure(text=f"● {self._nombre_destino}: PARADO", fg="#fca5a5")
+-        self._agregar_log("PARADA enviada al deploy. Para reanudar: reinicia el deploy y "
+-                          "pulsa Desconectar / Conectar.")
++        self._lanzado[self.modo_real] = False   # tras PARAR hay que reiniciar el deploy
++        self._agregar_log("PARADA enviada al deploy. Para reanudar: cierra la terminal del deploy, "
++                          "pulsa Desconectar y vuelve a abrir desde el botón.")
+ 
+     def _construir_ui(self):
+         c_fondo = "#1a1a2e"
+@@ -199,9 +295,9 @@ class VentanaVozASena:
+                  fg="#bfdbfe", font=("Segoe UI", 10)).pack(side="left", pady=14)
+ 
+         self._boton_sonic = tk.Button(
+-            encabezado, text=f"▶ Conectar {self._nombre_destino}", bg="white", fg=c_acento,
++            encabezado, text="■ Desconectar", bg="white", fg=c_acento,
+             relief="flat", font=("Segoe UI", 9, "bold"), padx=10,
+-            cursor="hand2", command=self._alternar_sonic,
++            cursor="hand2", command=self._alternar_sonic, state="disabled",
+         )
+         self._boton_sonic.pack(side="right", padx=(8, 16), pady=14)
+ 
+@@ -213,11 +309,25 @@ class VentanaVozASena:
+         self._boton_parar.pack(side="right", padx=(8, 0), pady=14)
+ 
+         self._lbl_sonic = tk.Label(
+-            encabezado, text=f"● {self._nombre_destino} sin conectar", bg=c_acento, fg="#bfdbfe",
++            encabezado, text="● Sin conectar", bg=c_acento, fg="#bfdbfe",
+             font=("Segoe UI", 9),
+         )
+         self._lbl_sonic.pack(side="right", pady=14)
+ 
++        # Barra de robot: simulación o robot real
++        barra = tk.Frame(cont, bg=c_fondo)
++        barra.pack(fill="x", padx=16, pady=(12, 0))
++        self._boton_sim = tk.Button(
++            barra, text="🖥 Abrir simulación MuJoCo", bg="#0ea5e9", fg="white", relief="flat",
++            font=("Segoe UI", 10, "bold"), pady=8, cursor="hand2",
++            command=lambda: self._pulsar(False))
++        self._boton_sim.pack(side="left", fill="x", expand=True, padx=(0, 6))
++        self._boton_real = tk.Button(
++            barra, text="🤖 Conectar robot real", bg="#f59e0b", fg="#1c1917", relief="flat",
++            font=("Segoe UI", 10, "bold"), pady=8, cursor="hand2",
++            command=lambda: self._pulsar(True))
++        self._boton_real.pack(side="left", fill="x", expand=True, padx=(6, 0))
++
+         # Panel de entrada de texto
+         panel_texto = tk.Frame(cont, bg=c_panel, padx=20, pady=16)
+         panel_texto.pack(fill="x", padx=16, pady=(16, 8))
+@@ -309,8 +419,9 @@ class VentanaVozASena:
+                 "auto": "micrófono del G1, o de la PC si no llega audio"}[self.mic]
+ 
+     def _texto_boton_voz(self) -> str:
+-        return "🎤  Hablar (micrófono del G1)" if self.mic == "g1" else (
+-            "🎤  Hablar (G1 o PC)" if self.mic == "auto" else "🎤  Hablar (micrófono de la PC)")
++        if self.mic == "auto":
++            return "🎤  Hablar (micrófono del G1)" if self.modo_real else "🎤  Hablar (micrófono de la PC)"
++        return "🎤  Hablar (micrófono del G1)" if self.mic == "g1" else "🎤  Hablar (micrófono de la PC)"
+ 
+     def _iniciar_escucha(self):
+         if self._escuchando:
+@@ -354,7 +465,7 @@ class VentanaVozASena:
+                 threading.Thread(target=self._enviar_al_robot, args=(señas,),
+                                  daemon=True).start()
+             else:
+-                self._agregar_log(f"Sin {self._nombre_destino} conectado: pulsa «▶ Conectar {self._nombre_destino}»")
++                self._agregar_log(f"Sin {self._nombre_destino} conectado: pulsa «🖥 Abrir simulación MuJoCo» o «🤖 Conectar robot real»")
+ 
+             no_reconocidas = resultado.get("no_reconocidas", [])
+             if no_reconocidas:
+-- 
+2.43.0
+

@@ -1,0 +1,569 @@
+From 704860ec6e3735e4d48f6e14aadb2cead26ab336 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 1 Oct 2026 11:02:33 -0500
+Subject: [PATCH] =?UTF-8?q?Voz:=20micr=C3=B3fono=20del=20G1=20por=20multic?=
+ =?UTF-8?q?ast=20(auto/pc/g1),=20diagn=C3=B3stico=20y=20documentaci=C3=B3n?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01KPXaB9faSBia4U7NFfYQrm
+---
+ app_unificada.py                 |  10 ++
+ docs/g1_real.md                  |  26 ++++
+ voz_a_sena/gui_principal.py      |  29 ++++-
+ voz_a_sena/microfono_g1.py       | 196 +++++++++++++++++++++++++++++++
+ voz_a_sena/probar_microfono.py   |  74 ++++++++++++
+ voz_a_sena/reconocimiento_voz.py |  63 +++++++---
+ voz_a_sena/servidor.py           |   7 +-
+ 7 files changed, 378 insertions(+), 27 deletions(-)
+ create mode 100644 voz_a_sena/microfono_g1.py
+ create mode 100644 voz_a_sena/probar_microfono.py
+
+diff --git a/app_unificada.py b/app_unificada.py
+index 19a71bb..3d612a2 100644
+--- a/app_unificada.py
++++ b/app_unificada.py
+@@ -137,6 +137,11 @@ def parsear_args():
+                    help="Tope de velocidad articular en rad/s (default 1.2 en real, sin tope en sim)")
+     p.add_argument("--sonic-confianza", type=float, default=0.8, metavar="0-1",
+                    help="Confianza mínima de la seña detectada por cámara para que el G1 la ejecute (default 0.8)")
++    p.add_argument("--mic", choices=["auto", "pc", "g1"], default="auto",
++                   help="Micrófono de voz: g1 = robot (multicast), pc = esta PC, "
++                        "auto = G1 con --sonic-real/--camara-g1 (con respaldo a la PC), si no PC")
++    p.add_argument("--mic-g1-ip", default=None, metavar="IP",
++                   help="IP de esta PC en la red del robot (192.168.123.x) para recibir el audio")
+     p.add_argument("--config", type=str, default="config.json")
+     p.add_argument("--log-nivel", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                    default="INFO")
+@@ -169,6 +174,11 @@ def main():
+     sonic_opciones = dict(modo_real=args.sonic_real, escala=args.sonic_escala,
+                           factor_tiempo=args.sonic_tiempo, vel_max=args.sonic_vel_max,
+                           confianza_min=args.sonic_confianza)
++    mic = args.mic
++    if mic == "auto" and not (args.sonic_real or args.camara_g1):
++        mic = "pc"
++    sonic_opciones.update(mic=mic, mic_iface_ip=args.mic_g1_ip)
++    log.info(f"Micrófono de voz: {mic}")
+     app = AppUnificada(config, sonic_opciones)
+     app.ejecutar()
+ 
+diff --git a/docs/g1_real.md b/docs/g1_real.md
+index 1973542..80ab852 100644
+--- a/docs/g1_real.md
++++ b/docs/g1_real.md
+@@ -119,3 +119,29 @@ El notebook entrena y despliega **una política por seña** con `--input-type zm
+ 3. En la PC, la app queda igual (`--sonic-real`); abre el puerto 5556 hacia el Jetson.
+ 
+ Esta variante no está probada con nuestra app y depende de que el build del Jetson esté completo.
++
++## Micrófono (voz) — usa el del robot
++
++Con `--sonic-real` o `--camara-g1` la voz se captura del **micrófono del G1** (UDP multicast
++`239.168.123.161:5555`, PCM 16 kHz mono) y, si no llega audio, cae al micrófono de la PC
++(modo `auto`). Opciones de `app_unificada.py`:
++
++| Opción | Efecto |
++|---|---|
++| `--mic auto` (defecto) | G1 si hay `--sonic-real`/`--camara-g1` (con respaldo a la PC); si no, PC |
++| `--mic g1` | Solo el del robot; si no llega audio, muestra el error |
++| `--mic pc` | Solo el de la PC |
++| `--mic-g1-ip IP` | IP de la PC en la red 192.168.123.x (si no se detecta sola) |
++
++Diagnóstico (antes de usar la app):
++
++```bash
++python -m voz_a_sena.probar_microfono g1 --ip 192.168.123.X   # paquetes y nivel del audio del robot
++python -m voz_a_sena.probar_microfono pc                       # lista micrófonos de la PC
++python -m voz_a_sena.probar_microfono g1 --reconocer           # además transcribe una frase
++```
++
++Notas: el formato del audio del G1 proviene de proyectos de terceros (no de la documentación
++oficial) y la recepción en una PC externa no está verificada; si `probar_microfono g1` da 0
++paquetes, revisar cable/IP en 192.168.123.x y firewall UDP 5555. El reconocimiento (Google)
++requiere internet.
+diff --git a/voz_a_sena/gui_principal.py b/voz_a_sena/gui_principal.py
+index c9f1166..f48b9c3 100644
+--- a/voz_a_sena/gui_principal.py
++++ b/voz_a_sena/gui_principal.py
+@@ -27,17 +27,23 @@ class VentanaVozASena:
+     TITULO = "LSC UDI — Voz/Texto a Sena | Robot G1"
+ 
+     def __init__(self, modo_real: bool = False, escala=None, factor_tiempo=None,
+-                 vel_max=None, confianza_min: float = 0.8):
++                 vel_max=None, confianza_min: float = 0.8,
++                 mic: str = "pc", mic_iface_ip: str = None):
+         """
+         modo_real      True: el deploy SONIC mueve el G1 FÍSICO (no MuJoCo). Exige confirmar
+                        el checklist de seguridad y limita amplitud y velocidad de las señas.
+         escala, factor_tiempo, vel_max   ver ConectorSonic (None = valores por defecto del modo).
+         confianza_min  confianza mínima de una seña detectada por la cámara para ejecutarla.
++        mic            "pc", "g1" (micrófono del robot, sin respaldo) o "auto" (G1 y, si no
++                       llega audio, la PC).
+         """
+         self.modo_real = modo_real
+         self._opciones_sonic = dict(escala=escala, factor_tiempo=factor_tiempo, vel_max=vel_max)
+         self.confianza_min = confianza_min
+-        self.servidor = ServidorVozASena()
++        self.mic = mic
++        self.servidor = ServidorVozASena(
++            fuente_mic="pc" if mic == "pc" else "g1",
++            mic_fallback_pc=(mic == "auto"), mic_iface_ip=mic_iface_ip)
+         self.robot = None  # ConectorG1 compartido; lo asigna app_unificada.py
+         self.sonic = None  # ConectorSonic (MuJoCo, 29 GDL); se crea al pulsar «Conectar MuJoCo»
+         self._raiz = None
+@@ -243,7 +249,7 @@ class VentanaVozASena:
+                  fg="#64748b", font=("Segoe UI", 9, "bold")).pack(anchor="w")
+ 
+         self._boton_voz = tk.Button(
+-            panel_voz, text="🎤  Mantener presionado para hablar",
++            panel_voz, text=self._texto_boton_voz(),
+             bg=c_verde, fg="#052e16", relief="flat",
+             font=("Segoe UI", 11, "bold"), pady=10,
+             cursor="hand2", command=self._iniciar_escucha,
+@@ -298,12 +304,20 @@ class VentanaVozASena:
+         resultado = self.servidor.procesar_texto(texto)
+         self._raiz.after(0, self._mostrar_resultado, resultado)
+ 
++    def _nombre_mic(self) -> str:
++        return {"pc": "micrófono de la PC", "g1": "micrófono del G1",
++                "auto": "micrófono del G1, o de la PC si no llega audio"}[self.mic]
++
++    def _texto_boton_voz(self) -> str:
++        return "🎤  Hablar (micrófono del G1)" if self.mic == "g1" else (
++            "🎤  Hablar (G1 o PC)" if self.mic == "auto" else "🎤  Hablar (micrófono de la PC)")
++
+     def _iniciar_escucha(self):
+         if self._escuchando:
+             return
+         self._escuchando = True
+         self._boton_voz.configure(text="🎤  Escuchando...", bg="#ef4444")
+-        self._agregar_log("Escuchando microfono...")
++        self._agregar_log(f"Escuchando... ({self._nombre_mic()})")
+         threading.Thread(target=self._procesar_voz, daemon=True).start()
+ 
+     def _procesar_voz(self):
+@@ -312,10 +326,13 @@ class VentanaVozASena:
+ 
+     def _finalizar_escucha(self, resultado: dict):
+         self._escuchando = False
+-        self._boton_voz.configure(text="🎤  Mantener presionado para hablar", bg="#22c55e")
++        self._boton_voz.configure(text=self._texto_boton_voz(), bg="#22c55e")
+ 
+         if resultado.get("texto_reconocido"):
+-            self._agregar_log(f"Voz reconocida: \"{resultado['texto_reconocido']}\"")
++            self._agregar_log(f"Voz reconocida ({resultado.get('fuente_mic', 'pc')}): "
++                              f"\"{resultado['texto_reconocido']}\"")
++        elif not resultado.get("exito") and resultado.get("mensaje"):
++            self._agregar_log(f"Voz: {resultado['mensaje']}")
+ 
+         self._mostrar_resultado(resultado)
+ 
+diff --git a/voz_a_sena/microfono_g1.py b/voz_a_sena/microfono_g1.py
+new file mode 100644
+index 0000000..ab08055
+--- /dev/null
++++ b/voz_a_sena/microfono_g1.py
+@@ -0,0 +1,196 @@
++"""
++microfono_g1.py — micrófono del Unitree G1 como fuente de voz.
++
++El G1 transmite el audio de su arreglo de micrófonos (lo origina el servicio de voz
++del PC1) por UDP multicast en la red del robot:
++
++    grupo 239.168.123.161 · puerto 5555 · PCM 16 kHz · mono · int16 little-endian
++    (paquetes de ~5120 bytes = 160 ms)
++
++Cualquier equipo de la red 192.168.123.x puede unirse al grupo; no hay que instalar nada en
++el robot. Este módulo se une al grupo por la interfaz cableada, detecta una frase por energía
++(VAD simple) y devuelve el PCM para que SpeechRecognition lo convierta en texto.
++
++Referencias del protocolo (comprobado en proyectos de terceros, no en documentación oficial):
++github.com/ja-avos/g1-audio-driver y github.com/bohcstams/unitree_converse.
++"""
++
++import logging
++import os
++import socket
++import struct
++import time
++from typing import Optional
++
++import numpy as np
++
++log = logging.getLogger("voz_a_sena.microfono_g1")
++
++GRUPO_G1 = "239.168.123.161"
++PUERTO_G1 = 5555
++FS = 16000                 # Hz
++BYTES_MUESTRA = 2          # int16
++TRAMA_MS = 20              # resolución del VAD
++IP_ROBOT_PC2 = "192.168.123.164"
++
++
++class MicrofonoG1:
++    """Captura frases del micrófono del G1 por multicast UDP.
++
++    grupo=None  recibe unicast en el puerto (para pruebas con un emisor local).
++    iface_ip    IP local de la interfaz cableada del robot. Si es None se usa la variable
++                de entorno G1_LOCAL_IP o se deduce de la ruta hacia el PC2 del robot.
++    """
++
++    def __init__(self, grupo: Optional[str] = GRUPO_G1, puerto: int = PUERTO_G1,
++                 iface_ip: Optional[str] = None):
++        self.grupo = grupo
++        self.puerto = puerto
++        self.iface_ip = iface_ip or os.environ.get("G1_LOCAL_IP")
++        self.error: Optional[str] = None
++        self._sock: Optional[socket.socket] = None
++
++    # ── Socket ───────────────────────────────────────────────────────
++    def _ip_local(self) -> str:
++        """IP de origen que usa esta PC para llegar al robot (la de la interfaz cableada)."""
++        if self.iface_ip:
++            return self.iface_ip
++        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
++        try:
++            s.connect((IP_ROBOT_PC2, 9))
++            return s.getsockname()[0]
++        finally:
++            s.close()
++
++    def abrir(self) -> bool:
++        if self._sock is not None:
++            return True
++        try:
++            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
++            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
++            if hasattr(socket, "SO_REUSEPORT"):
++                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
++            s.bind(("", self.puerto))
++            if self.grupo:
++                ip = self._ip_local()
++                mreq = struct.pack("4s4s", socket.inet_aton(self.grupo), socket.inet_aton(ip))
++                s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
++                log.info(f"Micrófono G1: unido a {self.grupo or 'unicast'}:{self.puerto} por {ip}")
++            s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
++            self._sock = s
++            self.error = None
++            return True
++        except OSError as e:
++            self.error = f"No se pudo abrir el audio del G1 ({self.grupo or 'unicast'}:{self.puerto}): {e}"
++            log.error(self.error)
++            return False
++
++    def cerrar(self):
++        if self._sock is not None:
++            try:
++                self._sock.close()
++            finally:
++                self._sock = None
++
++    def _vaciar(self):
++        """Descarta el audio viejo acumulado en el buffer del socket."""
++        self._sock.setblocking(False)
++        try:
++            while True:
++                self._sock.recv(65535)
++        except (BlockingIOError, OSError):
++            pass
++        finally:
++            self._sock.setblocking(True)
++
++    # ── Diagnóstico ──────────────────────────────────────────────────
++    def probar(self, segundos: float = 3.0) -> dict:
++        """Escucha `segundos` y resume: paquetes/s, bytes y nivel RMS (int16)."""
++        if not self.abrir():
++            return {"ok": False, "error": self.error}
++        self._vaciar()
++        n = nbytes = 0
++        rms = []
++        t0 = time.monotonic()
++        while time.monotonic() - t0 < segundos:
++            self._sock.settimeout(max(0.05, segundos - (time.monotonic() - t0)))
++            try:
++                d = self._sock.recv(65535)
++            except socket.timeout:
++                break
++            n += 1
++            nbytes += len(d)
++            x = np.frombuffer(d[: len(d) // 2 * 2], dtype="<i2").astype(np.float64)
++            if x.size:
++                rms.append(float(np.sqrt(np.mean(x * x))))
++        dur = nbytes / (FS * BYTES_MUESTRA)
++        return {"ok": n > 0, "paquetes": n, "segundos_audio": dur,
++                "rms_medio": float(np.mean(rms)) if rms else 0.0,
++                "rms_max": float(np.max(rms)) if rms else 0.0,
++                "error": None if n else
++                f"No llegan paquetes a {self.grupo or 'unicast'}:{self.puerto} en {segundos:.0f} s"}
++
++    # ── Captura de una frase ─────────────────────────────────────────
++    def capturar_frase(self, timeout_espera: float = 5.0, limite_frase: float = 8.0,
++                       silencio_fin: float = 0.8, umbral_rms: Optional[float] = None,
++                       preroll: float = 0.3) -> Optional[bytes]:
++        """Espera a que alguien hable y devuelve el PCM (int16 LE, 16 kHz, mono) de la frase.
++
++        Devuelve None si no llega audio o nadie habla en `timeout_espera` s; self.error
++        explica cuál de los dos casos fue. El umbral se adapta al ruido de fondo medido en
++        los primeros 0.5 s (3x el ruido, nunca menos de 250 de RMS).
++        """
++        if not self.abrir():
++            return None
++        self._vaciar()
++        trama = FS * BYTES_MUESTRA * TRAMA_MS // 1000          # bytes por trama de 20 ms
++        pre_max = int(preroll * 1000 / TRAMA_MS)
++        resto = b""
++        previas, frase = [], []
++        ruido = []
++        umbral = umbral_rms
++        hablando = False
++        silencio = 0.0
++        t_ini = time.monotonic()
++        t_voz = None
++        recibio = False
++
++        while True:
++            ahora = time.monotonic()
++            if not hablando and ahora - t_ini > timeout_espera:
++                self.error = ("Tiempo de espera agotado, no se detectó voz" if recibio else
++                              f"No llegan paquetes de audio a {self.grupo or 'unicast'}:{self.puerto}")
++                return None
++            if hablando and ahora - t_voz > limite_frase:
++                break
++            self._sock.settimeout(0.5)
++            try:
++                d = self._sock.recv(65535)
++            except socket.timeout:
++                continue
++            recibio = True
++            buf = resto + d
++            n = len(buf) // trama * trama
++            resto = buf[n:]
++            for i in range(0, n, trama):
++                f = buf[i:i + trama]
++                x = np.frombuffer(f, dtype="<i2").astype(np.float64)
++                rms = float(np.sqrt(np.mean(x * x)))
++                if umbral is None:
++                    ruido.append(rms)
++                    if len(ruido) * TRAMA_MS >= 500:
++                        umbral = max(250.0, 3.0 * float(np.median(ruido)))
++                        log.info(f"Micrófono G1: ruido {np.median(ruido):.0f} -> umbral {umbral:.0f}")
++                    previas = (previas + [f])[-pre_max:]
++                    continue
++                if not hablando:
++                    previas = (previas + [f])[-pre_max:]
++                    if rms > umbral:
++                        hablando, t_voz, silencio = True, time.monotonic(), 0.0
++                        frase = list(previas)
++                    continue
++                frase.append(f)
++                silencio = 0.0 if rms > umbral else silencio + TRAMA_MS / 1000
++                if silencio >= silencio_fin:
++                    return b"".join(frase)
++        return b"".join(frase)
+diff --git a/voz_a_sena/probar_microfono.py b/voz_a_sena/probar_microfono.py
+new file mode 100644
+index 0000000..e731bb9
+--- /dev/null
++++ b/voz_a_sena/probar_microfono.py
+@@ -0,0 +1,74 @@
++"""
++Diagnóstico del micrófono.
++
++    python -m voz_a_sena.probar_microfono g1 [--ip 192.168.123.X]   # micrófono del robot
++    python -m voz_a_sena.probar_microfono pc                         # micrófono de la PC
++Añade --reconocer para además transcribir una frase (necesita internet).
++"""
++import argparse
++import sys
++
++
++def probar_g1(ip, reconocer):
++    from voz_a_sena.microfono_g1 import MicrofonoG1
++    mic = MicrofonoG1(iface_ip=ip)
++    try:
++        mic.abrir()
++    except Exception as e:
++        print(f"[ERROR] No se pudo abrir el multicast del G1: {e}")
++        return 1
++    print("Escuchando 3 s el audio del G1 (habla cerca del robot)...")
++    r = mic.probar(3.0)
++    print(r)
++    if r.get("paquetes", 0) == 0:
++        print("[FALLO] No llega audio. Revisa: cable/Ethernet a la red 192.168.123.x, "
++              "IP de la PC en esa red (usa --ip), firewall (UDP 5555) y que el servicio de "
++              "audio del robot esté activo.")
++        mic.cerrar()
++        return 2
++    print("[OK] Llega audio del G1.")
++    if reconocer:
++        from voz_a_sena.reconocimiento_voz import ReconocedorVoz
++        print("Di una frase...")
++        res = ReconocedorVoz(fuente="g1", iface_ip=ip).escuchar()
++        print(res)
++    mic.cerrar()
++    return 0
++
++
++def probar_pc(reconocer):
++    try:
++        import speech_recognition as sr
++    except ImportError:
++        print("[ERROR] Falta SpeechRecognition: pip install SpeechRecognition")
++        return 1
++    try:
++        nombres = sr.Microphone.list_microphone_names()
++    except Exception as e:
++        print(f"[ERROR] PyAudio/PortAudio no funciona: {e}\n"
++              "  Ubuntu: sudo apt install portaudio19-dev && pip install pyaudio")
++        return 1
++    print("Micrófonos detectados:")
++    for i, n in enumerate(nombres):
++        print(f"  [{i}] {n}")
++    if not nombres:
++        print("[FALLO] No hay micrófonos de entrada.")
++        return 2
++    if reconocer:
++        from voz_a_sena.reconocimiento_voz import ReconocedorVoz
++        print("Di una frase...")
++        print(ReconocedorVoz(fuente="pc").escuchar())
++    return 0
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("fuente", choices=["g1", "pc"])
++    ap.add_argument("--ip", default=None, help="IP local en la red del robot")
++    ap.add_argument("--reconocer", action="store_true")
++    a = ap.parse_args()
++    sys.exit(probar_g1(a.ip, a.reconocer) if a.fuente == "g1" else probar_pc(a.reconocer))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/voz_a_sena/reconocimiento_voz.py b/voz_a_sena/reconocimiento_voz.py
+index 5b4ecc3..918bf21 100644
+--- a/voz_a_sena/reconocimiento_voz.py
++++ b/voz_a_sena/reconocimiento_voz.py
+@@ -23,6 +23,7 @@ class ResultadoVoz:
+     texto: str
+     exito: bool
+     error: str = ""
++    fuente: str = "pc"
+ 
+ 
+ class ReconocedorVoz:
+@@ -37,7 +38,18 @@ class ReconocedorVoz:
+     """
+ 
+     def __init__(self, idioma: str = "es-CO", timeout_segundos: float = 5.0,
+-                 limite_frase_segundos: float = 8.0):
++                 limite_frase_segundos: float = 8.0, fuente: str = "pc",
++                 fallback_pc: bool = False, iface_ip: str = None):
++        """
++        fuente       "pc" (micrófono de esta PC) o "g1" (micrófono del robot por multicast).
++        fallback_pc  con fuente "g1": si el robot no entrega audio, usa el micrófono de la PC.
++        """
++        self.fuente = fuente
++        self.fallback_pc = fallback_pc
++        self._mic_g1 = None
++        if fuente == "g1":
++            from voz_a_sena.microfono_g1 import MicrofonoG1
++            self._mic_g1 = MicrofonoG1(iface_ip=iface_ip)
+         self.idioma = idioma
+         self.timeout_segundos = timeout_segundos
+         self.limite_frase_segundos = limite_frase_segundos
+@@ -91,31 +103,44 @@ class ReconocedorVoz:
+                       "Instala con: pip install SpeechRecognition pyaudio"
+             )
+ 
+-        try:
+-            with sr.Microphone(device_index=microfono_idx) as fuente:
+-                log.info("Escuchando... (habla ahora)")
+-                audio = self._recognizer.listen(
+-                    fuente,
+-                    timeout=self.timeout_segundos,
+-                    phrase_time_limit=self.limite_frase_segundos,
+-                )
+-        except sr.WaitTimeoutError:
+-            return ResultadoVoz(texto="", exito=False, error="Tiempo de espera agotado, no se detecto voz")
+-        except OSError as e:
+-            return ResultadoVoz(texto="", exito=False, error=f"Error de microfono: {e}")
+-        except Exception as e:
+-            return ResultadoVoz(texto="", exito=False, error=f"Error capturando audio: {e}")
++        fuente = self.fuente
++        audio = None
++        if fuente == "g1":
++            pcm = self._mic_g1.capturar_frase(self.timeout_segundos, self.limite_frase_segundos)
++            if pcm is not None:
++                audio = sr.AudioData(pcm, 16000, 2)
++            elif self.fallback_pc and "No llegan paquetes" in (self._mic_g1.error or ""):
++                log.warning(f"{self._mic_g1.error}. Se usa el micrófono de la PC.")
++                fuente = "pc"
++            else:
++                return ResultadoVoz(texto="", exito=False, fuente="g1",
++                                    error=self._mic_g1.error or "Sin audio del G1")
++        if fuente == "pc":
++            try:
++                with sr.Microphone(device_index=microfono_idx) as fuente_audio:
++                    log.info("Escuchando... (habla ahora)")
++                    audio = self._recognizer.listen(
++                        fuente_audio,
++                        timeout=self.timeout_segundos,
++                        phrase_time_limit=self.limite_frase_segundos,
++                    )
++            except sr.WaitTimeoutError:
++                return ResultadoVoz(texto="", exito=False, error="Tiempo de espera agotado, no se detecto voz")
++            except OSError as e:
++                return ResultadoVoz(texto="", exito=False, error=f"Error de microfono: {e}")
++            except Exception as e:
++                return ResultadoVoz(texto="", exito=False, error=f"Error capturando audio: {e}")
+ 
+         log.info("Procesando audio...")
+         try:
+             texto = self._recognizer.recognize_google(audio, language=self.idioma)
+-            log.info(f"Texto reconocido: '{texto}'")
+-            return ResultadoVoz(texto=texto, exito=True)
++            log.info(f"Texto reconocido: '{texto}' (micrófono {fuente})")
++            return ResultadoVoz(texto=texto, exito=True, fuente=fuente)
+         except sr.UnknownValueError:
+-            return ResultadoVoz(texto="", exito=False, error="No se pudo entender el audio")
++            return ResultadoVoz(texto="", exito=False, fuente=fuente, error="No se pudo entender el audio")
+         except sr.RequestError as e:
+             return ResultadoVoz(
+-                texto="", exito=False,
++                texto="", exito=False, fuente=fuente,
+                 error=f"Error de conexion con el servicio de reconocimiento: {e}. "
+                       "Verifica tu conexion a internet."
+             )
+diff --git a/voz_a_sena/servidor.py b/voz_a_sena/servidor.py
+index 3d91180..d7b78b2 100644
+--- a/voz_a_sena/servidor.py
++++ b/voz_a_sena/servidor.py
+@@ -96,10 +96,12 @@ class ServidorVozASena:
+     de posturas, y transmision al visor 3D via WebSocket.
+     """
+ 
+-    def __init__(self):
++    def __init__(self, fuente_mic: str = "pc", mic_fallback_pc: bool = False,
++                 mic_iface_ip: str = None):
+         self.traductor = TraductorTextoLSC()
+         self.generador = GeneradorPosturas()
+-        self.reconocedor_voz = ReconocedorVoz()
++        self.reconocedor_voz = ReconocedorVoz(fuente=fuente_mic, fallback_pc=mic_fallback_pc,
++                                              iface_ip=mic_iface_ip)
+         self._loop_ws = None
+         self._servidor_ws = None
+ 
+@@ -149,6 +151,7 @@ class ServidorVozASena:
+ 
+         resultado = self.procesar_texto(resultado_voz.texto)
+         resultado["texto_reconocido"] = resultado_voz.texto
++        resultado["fuente_mic"] = resultado_voz.fuente
+         return resultado
+ 
+     def iniciar_servidores(self):
+-- 
+2.43.0
+

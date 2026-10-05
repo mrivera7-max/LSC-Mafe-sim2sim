@@ -1,0 +1,129 @@
+From eaad2ae774a5e295cfaf700f4acaee4ae4335c6a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 1 Oct 2026 11:18:04 -0500
+Subject: [PATCH] =?UTF-8?q?Micr=C3=B3fono=20G1:=20unirse=20al=20multicast?=
+ =?UTF-8?q?=20por=20todas=20las=20interfaces=20y=20modo=20escanear?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01KPXaB9faSBia4U7NFfYQrm
+---
+ voz_a_sena/microfono_g1.py     | 38 ++++++++++++++++++++++++++++++----
+ voz_a_sena/probar_microfono.py | 33 ++++++++++++++++++++++++++++-
+ 2 files changed, 66 insertions(+), 5 deletions(-)
+
+diff --git a/voz_a_sena/microfono_g1.py b/voz_a_sena/microfono_g1.py
+index ab08055..1ffbbc1 100644
+--- a/voz_a_sena/microfono_g1.py
++++ b/voz_a_sena/microfono_g1.py
+@@ -62,6 +62,22 @@ class MicrofonoG1:
+         finally:
+             s.close()
+ 
++    @staticmethod
++    def ips_locales() -> list:
++        """Todas las IPv4 locales (sin loopback), p. ej. cable del robot y Wi-Fi."""
++        import subprocess
++        ips = []
++        try:
++            out = subprocess.run(["ip", "-4", "-o", "addr"], capture_output=True,
++                                 text=True, timeout=3).stdout
++            for linea in out.splitlines():
++                ip = linea.split()[3].split("/")[0]
++                if not ip.startswith("127."):
++                    ips.append(ip)
++        except Exception:
++            pass
++        return ips
++
+     def abrir(self) -> bool:
+         if self._sock is not None:
+             return True
+@@ -72,10 +88,24 @@ class MicrofonoG1:
+                 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+             s.bind(("", self.puerto))
+             if self.grupo:
+-                ip = self._ip_local()
+-                mreq = struct.pack("4s4s", socket.inet_aton(self.grupo), socket.inet_aton(ip))
+-                s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+-                log.info(f"Micrófono G1: unido a {self.grupo or 'unicast'}:{self.puerto} por {ip}")
++                if self.iface_ip:
++                    ips = [self.iface_ip]
++                else:
++                    # Sin IP indicada: unirse por TODAS las interfaces (la del cable del robot
++                    # puede no ser la de la ruta por defecto, p. ej. si hay Wi-Fi).
++                    ips = list(dict.fromkeys([self._ip_local()] + self.ips_locales()))
++                unidas = []
++                for ip in ips:
++                    try:
++                        mreq = struct.pack("4s4s", socket.inet_aton(self.grupo),
++                                           socket.inet_aton(ip))
++                        s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
++                        unidas.append(ip)
++                    except OSError as e:
++                        log.debug(f"Multicast: no se pudo unir por {ip}: {e}")
++                if not unidas:
++                    raise OSError(f"no se pudo unir al grupo {self.grupo} por ninguna interfaz {ips}")
++                log.info(f"Micrófono G1: unido a {self.grupo}:{self.puerto} por {unidas}")
+             s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
+             self._sock = s
+             self.error = None
+diff --git a/voz_a_sena/probar_microfono.py b/voz_a_sena/probar_microfono.py
+index e731bb9..b50695a 100644
+--- a/voz_a_sena/probar_microfono.py
++++ b/voz_a_sena/probar_microfono.py
+@@ -36,6 +36,35 @@ def probar_g1(ip, reconocer):
+     return 0
+ 
+ 
++def escanear(segundos=6.0):
++    """Escucha el puerto 5555 en todas las interfaces y dice quién envía qué (sin unirse a grupos)."""
++    import socket, time, struct
++    from voz_a_sena.microfono_g1 import MicrofonoG1, GRUPO_G1, PUERTO_G1
++    print("IPs locales:", MicrofonoG1.ips_locales())
++    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
++    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
++    s.bind(("", PUERTO_G1))
++    for ip in MicrofonoG1.ips_locales():
++        try:
++            s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
++                         struct.pack("4s4s", socket.inet_aton(GRUPO_G1), socket.inet_aton(ip)))
++        except OSError:
++            pass
++    s.settimeout(0.5)
++    vistos, t0 = {}, time.time()
++    print(f"Escaneando UDP {PUERTO_G1} durante {segundos:.0f} s (habla cerca del robot)...")
++    while time.time() - t0 < segundos:
++        try:
++            d, a = s.recvfrom(65535)
++            vistos[a[0]] = vistos.get(a[0], 0) + 1
++            vistos.setdefault("tam", len(d))
++        except socket.timeout:
++            pass
++    vistos_ips = {k: v for k, v in vistos.items() if k != "tam"}
++    print("Emisores:", vistos_ips or "NINGUNO", f"(tamaño paquete: {vistos.get('tam')})" if vistos_ips else "")
++    return 0 if vistos_ips else 2
++
++
+ def probar_pc(reconocer):
+     try:
+         import speech_recognition as sr
+@@ -63,10 +92,12 @@ def probar_pc(reconocer):
+ 
+ def main():
+     ap = argparse.ArgumentParser()
+-    ap.add_argument("fuente", choices=["g1", "pc"])
++    ap.add_argument("fuente", choices=["g1", "pc", "escanear"])
+     ap.add_argument("--ip", default=None, help="IP local en la red del robot")
+     ap.add_argument("--reconocer", action="store_true")
+     a = ap.parse_args()
++    if a.fuente == "escanear":
++        sys.exit(escanear())
+     sys.exit(probar_g1(a.ip, a.reconocer) if a.fuente == "g1" else probar_pc(a.reconocer))
+ 
+ 
+-- 
+2.43.0
+

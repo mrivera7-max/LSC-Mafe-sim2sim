@@ -1,0 +1,696 @@
+diff --git a/README.md b/README.md
+index bc8df43..7ce132d 100644
+--- a/README.md
++++ b/README.md
+@@ -20,7 +20,8 @@ lsc_bridge/
+ │   └── capturar_muestras.py    ← Herramienta para construir el dataset
+ │
+ ├── robot/
+-│   └── conector_g1.py          ← Integración SDK Unitree G1
++│   ├── conector_g1.py          ← Integración SDK Unitree G1
++│   └── conector_sonic.py       ← Voz/Texto → G1 en MuJoCo (29 GDL, política SONIC)
+ │
+ ├── gui/
+ │   ├── ventana_principal.py    ← Ventana principal (Tkinter + OpenCV)
+@@ -130,6 +131,10 @@ python main.py
+ 
+ ## 🤖 Conexión al Unitree G1
+ 
++> **Voz/Texto → Seña en MuJoCo:** la pestaña de voz de `app_unificada.py` ejecuta las
++> señas en el G1 de 29 GDL con la política SONIC (sin Pico 4). Guía en
++> [`docs/sonic_mujoco.md`](docs/sonic_mujoco.md).
++
+ El robot debe estar encendido y conectado a la misma red (ethernet o WiFi directo).
+ 
+ IP por defecto: `192.168.123.161:8080`
+diff --git a/docs/sonic_mujoco.md b/docs/sonic_mujoco.md
+new file mode 100644
+index 0000000..f979c45
+--- /dev/null
++++ b/docs/sonic_mujoco.md
+@@ -0,0 +1,100 @@
++# Voz/Texto → Seña en MuJoCo (G1 de 29 GDL, política SONIC) — sin Pico 4
++
++La pestaña **Voz / Texto → Seña** de `app_unificada.py` ya no abre el visor 3D del
++navegador. Ahora ejecuta las señas en el mismo entorno del runbook *sim2sim*
++(GR00T-WholeBodyControl): MuJoCo con el G1 de 29 GDL y la política SONIC en ONNX.
++
++```
++App LSC ──ZMQ :5556──▶ deploy.sh (política SONIC) ──▶ run_sim_loop.py (MuJoCo)
++```
++
++La app publica por ZMQ el mensaje `planner` con la posición de los 17 GDL de torso y
++brazos (`upper_body_position`); la política mantiene al G1 de pie y sigue esas
++posiciones. Las piernas las controla la política. Código: `robot/conector_sonic.py`.
++
++## Qué NO se necesita (respecto al runbook sim2sim)
++
++Hotspot `G1Capture`, Pico 4, trackers, XRoboToolkit (Terminal 0) y el Pico manager
++(Terminal 3). El `command` de arranque que antes enviaba el Pico manager lo envía ahora
++la app.
++
++## Requisitos (una sola vez)
++
++- El runbook sim2sim ya funciona en `5062robotika` (`~/blea/GR00T-WholeBodyControl`,
++  `.venv_teleop`, deploy compilado, modelos ONNX descargados).
++- Entorno de la app LSC con `pip install -r requirements.txt` (incluye `pyzmq`).
++- Puerto **5556** libre. Si el Pico manager sigue corriendo, ciérralo: usa el mismo puerto.
++
++## Arranque (cada sesión, en este orden)
++
++**Terminal 1 — MuJoCo**
++
++```bash
++cd ~/blea/GR00T-WholeBodyControl
++source .venv_teleop/bin/activate
++python gear_sonic/scripts/run_sim_loop.py
++```
++
++Espera a que abra la ventana con el G1.
++
++**Terminal 2 — deploy ONNX**
++
++```bash
++cd ~/blea/GR00T-WholeBodyControl/gear_sonic_deploy
++source scripts/setup_env.sh
++./deploy.sh --input-type zmq_manager sim
++```
++
++Confirma cuando pregunte y espera `Init done`.
++
++**Terminal 3 — app LSC**
++
++```bash
++cd ~/LSC-Mafe
++source venv/bin/activate
++python app_unificada.py --sin-robot --v2
++```
++
++1. Pestaña **Voz / Texto → Seña** → **▶ Conectar MuJoCo G1**. Debe decir
++   `● MuJoCo conectado (:5556)`. En la Terminal 2 debe aparecer `Planner enabled`.
++2. En la ventana de MuJoCo pulsa **`9`** para soltar al G1 al suelo.
++3. Escribe o di una frase (por ejemplo «hola gracias»). El G1 hace cada seña y vuelve
++   a la postura de pie.
++
++Parada de emergencia: tecla **`O`** en la Terminal 2 (igual que en el runbook).
++
++## Diagnóstico
++
++| Síntoma | Causa probable | Qué hacer |
++|---|---|---|
++| El botón dice `No se pudo conectar: … Address already in use` | Otro publicador usa el puerto 5556 (Pico manager, otra instancia de la app) | Cerrarlo y reintentar |
++| Conecta pero el G1 no se mueve | El comando `start` llegó antes de que el deploy estuviera listo | **Desconectar** y **Conectar** otra vez (reenvía `start`); el deploy debe estar en `Init done` |
++| El G1 se mueve pero cuelga de la banda | Falta soltarlo | Tecla `9` en la ventana de MuJoCo |
++| Tras una parada con `O` el G1 no reacciona | Control detenido | Reiniciar Terminal 2 y volver a pulsar Desconectar → Conectar |
++| «Sin simulación conectada» en el registro | No se pulsó el botón | Pulsar **▶ Conectar MuJoCo G1** |
++
++## Detalles técnicos
++
++- Mensajes idénticos byte a byte al publicador de referencia
++  (`gear_sonic_deploy/.../tests/test_zmq_manager.py`): tópico + cabecera JSON de 1280 B + datos.
++- El deploy descarta mensajes `planner` de más de ~100 ms; la app los reenvía a 50 Hz
++  con la postura actual (perfil coseno, velocidad analítica incluida).
++- Orden de los 17 valores: torso (yaw, roll, pitch) y, por pares izquierda/derecha,
++  hombro pitch, hombro roll, hombro yaw, codo, muñeca roll, muñeca pitch, muñeca yaw
++  (`upper_body_joint_isaaclab_order_in_mujoco_index` en `policy_parameters.hpp`).
++- Reposo = postura de pie por defecto de la política (`default_angles`), así no hay
++  saltos al empezar ni al terminar.
++- Los ángulos de `POSTURAS_G1` (`robot/conector_g1.py`) se reutilizan con los signos ya
++  verificados en la Fase 4 (brazo derecho: roll y yaw espejados). Un campo en `0.0`
++  significa «la seña no lo define» y se queda en la postura de pie.
++- Cada ángulo se recorta a los límites del modelo (`g1_29dof_old_freebase.xml`).
++
++## Limitaciones
++
++- El modelo de 29 GDL no tiene dedos articulados: solo se ven posiciones de brazo y
++  muñeca, no la forma de la mano.
++- Las posturas de `POSTURAS_G1` se ajustaron con `unitree_mujoco` (robot colgado, kp=40).
++  Con la política SONIC pueden necesitar retoques finos.
++- El visor web (`voz_a_sena/servidor.py`, `static/index.html`) sigue en el repositorio
++  y funciona por separado con `python voz_a_sena/servidor.py`, pero la app unificada
++  ya no lo levanta.
+diff --git a/requirements.txt b/requirements.txt
+index a32b90f..19e2448 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -21,6 +21,7 @@ PyAudio==0.2.14
+ pycparser==3.0
+ pyparsing==3.3.2
+ python-dateutil==2.9.0.post0
++pyzmq==27.2.0
+ scikit-learn==1.9.1
+ scipy==1.18.1
+ six==1.17.0
+diff --git a/robot/conector_sonic.py b/robot/conector_sonic.py
+new file mode 100644
+index 0000000..6321822
+--- /dev/null
++++ b/robot/conector_sonic.py
+@@ -0,0 +1,326 @@
++"""
++conector_sonic.py — LSC UDI -> política SONIC en MuJoCo (Unitree G1, 29 GDL).
++
++Sustituye al visor 3D del navegador en la pestaña Voz/Texto. Las señas se
++ejecutan en el mismo entorno del runbook sim2sim (GR00T-WholeBodyControl),
++pero SIN Pico 4: este módulo hace de publicador ZMQ y el deploy ONNX lo lee
++con `--input-type zmq_manager`.
++
++    App LSC ──ZMQ :5556──▶ deploy.sh (política SONIC, ONNX) ──▶ run_sim_loop.py (MuJoCo)
++
++Qué se envía
++------------
++Topic `command`  {start, stop, planner}: arranca el control y elige modo planner.
++Topic `planner`  {mode=IDLE, movement, facing, speed, height,
++                  upper_body_position[17], upper_body_velocity[17]}.
++  El planner mantiene al G1 de pie (IDLE) y los 17 GDL de torso y brazos siguen
++  las posiciones que enviamos. Las piernas las controla la política.
++
++El deploy considera obsoleto un mensaje `planner` de más de ~100 ms, así que
++un hilo lo reenvía continuamente (50 Hz) con la postura actual.
++
++Formato de mensaje (idéntico a gear_sonic_deploy/.../tests/test_zmq_manager.py):
++    topic + cabecera JSON rellena con NUL hasta 1280 bytes + datos little-endian.
++
++Orden de los 17 valores (IsaacLab restringido al tren superior, según
++policy_parameters.hpp: upper_body_joint_isaaclab_order_in_mujoco_index):
++    waist yaw/roll/pitch, hombro pitch L/R, hombro roll L/R, hombro yaw L/R,
++    codo L/R, muñeca roll L/R, muñeca pitch L/R, muñeca yaw L/R.
++"""
++
++import json
++import logging
++import math
++import threading
++import time
++from typing import Dict, Optional
++
++import numpy as np
++
++try:
++    import zmq
++except ImportError:  # se avisa al llamar a conectar()
++    zmq = None
++
++from robot.conector_g1 import POSTURAS_G1, ComandoArticular
++
++log = logging.getLogger("lsc_bridge.conector_sonic")
++
++# ── Protocolo ZMQ del deploy ─────────────────────────────────────────────
++HEADER_SIZE = 1280
++TOPIC_COMMAND = b"command"
++TOPIC_PLANNER = b"planner"
++MODO_IDLE = 0                      # LocomotionMode::IDLE: el G1 se queda de pie
++
++_DTYPES = {"u8": "u1", "i32": "<i4", "f32": "<f4"}
++
++# ── Articulaciones ───────────────────────────────────────────────────────
++# Índice MuJoCo de cada uno de los 17 valores de upper_body_position.
++UB17_A_MJ = (12, 13, 14, 15, 22, 16, 23, 17, 24, 18, 25, 19, 26, 20, 27, 21, 28)
++MJ_A_UB17 = {mj: i for i, mj in enumerate(UB17_A_MJ)}
++
++# Postura de pie por defecto de la política (default_angles en policy_parameters.hpp).
++# Es la postura de REPOSO: con ella no hay salto al empezar ni al terminar.
++POSTURA_BASE_MJ = {
++    12: 0.0, 13: 0.0, 14: 0.0,
++    15: 0.2, 16: 0.2, 17: 0.0, 18: 0.6, 19: 0.0, 20: 0.0, 21: 0.0,
++    22: 0.2, 23: -0.2, 24: 0.0, 25: 0.6, 26: 0.0, 27: 0.0, 28: 0.0,
++}
++
++# Límites articulares (g1_29dof_old_freebase.xml, el modelo de scene_29dof_freebase.xml).
++LIMITES_MJ = {
++    12: (-2.618, 2.618), 13: (-0.52, 0.52), 14: (-0.52, 0.52),
++    15: (-3.0892, 2.6704), 16: (-1.5882, 2.2515), 17: (-2.618, 2.618),
++    18: (-1.0472, 2.0944), 19: (-1.97222, 1.97222),
++    20: (-1.61443, 1.61443), 21: (-1.61443, 1.61443),
++    22: (-3.0892, 2.6704), 23: (-2.2515, 1.5882), 24: (-2.618, 2.618),
++    25: (-1.0472, 2.0944), 26: (-1.97222, 1.97222),
++    27: (-1.61443, 1.61443), 28: (-1.61443, 1.61443),
++}
++
++# Campo de ComandoArticular -> (índice MuJoCo, signo). Mismos signos verificados
++# en robot_sim/reproducir_sena.py (el brazo derecho es espejo en roll y yaw).
++CAMPOS_A_MJ = {
++    "hombro_izq_pitch": (15, +1), "hombro_izq_roll": (16, +1), "codo_izq": (18, +1),
++    "muñeca_izq_pitch": (20, +1), "muñeca_izq_yaw": (21, +1),
++    "hombro_der_pitch": (22, +1), "hombro_der_roll": (23, -1), "codo_der": (25, +1),
++    "muñeca_der_pitch": (27, +1), "muñeca_der_yaw": (28, -1),
++}
++
++
++def comando_a_objetivos_mj(cmd: ComandoArticular) -> Dict[int, float]:
++    """ComandoArticular -> {índice MuJoCo: ángulo en rad}.
++
++    Un campo en 0.0 significa "la seña no lo define" y se deja en la postura
++    de pie de la política (así, una seña de mano derecha no estira el brazo izquierdo).
++    """
++    objetivos = {}
++    for campo, (mj, signo) in CAMPOS_A_MJ.items():
++        valor = getattr(cmd, campo)
++        objetivos[mj] = POSTURA_BASE_MJ[mj] if valor == 0.0 else signo * valor
++    return objetivos
++
++
++# ── Empaquetado de mensajes ──────────────────────────────────────────────
++
++def _empaquetar(topic: bytes, campos) -> bytes:
++    """campos: lista de (nombre, dtype 'u8'|'i32'|'f32', ndarray-like)."""
++    arreglos = [(n, d, np.asarray(a, dtype=_DTYPES[d])) for n, d, a in campos]
++    cabecera = {
++        "v": 1,
++        "endian": "le",
++        "count": 1,
++        "fields": [{"name": n, "dtype": d, "shape": list(a.shape)} for n, d, a in arreglos],
++    }
++    cabecera_json = json.dumps(cabecera).encode("utf-8")
++    if len(cabecera_json) > HEADER_SIZE:
++        raise ValueError(f"Cabecera ZMQ demasiado grande ({len(cabecera_json)} > {HEADER_SIZE})")
++    cabecera_bytes = cabecera_json + b"\x00" * (HEADER_SIZE - len(cabecera_json))
++    datos = b"".join(a.tobytes() for _, _, a in arreglos)
++    return topic + cabecera_bytes + datos
++
++
++def empaquetar_comando(start: bool, stop: bool, planner: bool) -> bytes:
++    return _empaquetar(TOPIC_COMMAND, [
++        ("start", "u8", [1 if start else 0]),
++        ("stop", "u8", [1 if stop else 0]),
++        ("planner", "u8", [1 if planner else 0]),
++    ])
++
++
++def empaquetar_planner(upper_body_position, upper_body_velocity=None,
++                       mode: int = MODO_IDLE) -> bytes:
++    campos = [
++        ("mode", "i32", [mode]),
++        ("movement", "f32", [0.0, 0.0, 0.0]),
++        ("facing", "f32", [1.0, 0.0, 0.0]),
++        ("speed", "f32", [-1.0]),
++        ("height", "f32", [-1.0]),
++        ("upper_body_position", "f32", np.asarray(upper_body_position).reshape(17)),
++    ]
++    if upper_body_velocity is not None:
++        campos.append(("upper_body_velocity", "f32", np.asarray(upper_body_velocity).reshape(17)))
++    return _empaquetar(TOPIC_PLANNER, campos)
++
++
++# ── Conector ─────────────────────────────────────────────────────────────
++
++class ConectorSonic:
++    """Publica señas LSC hacia el deploy de SONIC (MuJoCo, 29 GDL).
++
++    Misma idea que ConectorG1: `enviar_seña("Hola")` bloquea lo que dura el
++    movimiento, así que se llama desde un hilo (la GUI ya lo hace).
++    """
++
++    def __init__(self, host: str = "*", puerto: int = 5556, hz: float = 50.0):
++        self.host = host
++        self.puerto = puerto
++        self.hz = hz
++        self.error: Optional[str] = None
++
++        self._ctx = None
++        self._pub = None
++        self._lock_pub = threading.Lock()
++        self._activo = threading.Event()
++        self._hilo: Optional[threading.Thread] = None
++
++        # Trayectoria del tren superior (17 GDL, orden UB17)
++        self._lock_tray = threading.Lock()
++        base = np.array([POSTURA_BASE_MJ[mj] for mj in UB17_A_MJ], dtype=np.float64)
++        self._q_from = base.copy()
++        self._q_to = base.copy()
++        self._t0 = time.monotonic()
++        self._dur = 1.0
++
++    # ── Conexión ─────────────────────────────────────────────────────
++    def conectar(self) -> bool:
++        """Abre el publicador ZMQ y empieza a transmitir la postura de pie."""
++        if zmq is None:
++            self.error = "pyzmq no instalado (pip install pyzmq)"
++            log.error(self.error)
++            return False
++        if self.conectado:
++            return True
++        try:
++            self._ctx = zmq.Context()
++            self._pub = self._ctx.socket(zmq.PUB)
++            self._pub.setsockopt(zmq.LINGER, 0)
++            self._pub.bind(f"tcp://{self.host}:{self.puerto}")
++        except zmq.ZMQError as e:
++            self.error = f"No se pudo abrir el puerto {self.puerto}: {e}"
++            log.error(self.error)
++            self._liberar()
++            return False
++
++        time.sleep(0.5)  # da tiempo a que el deploy (subscriptor) se enganche
++        self.error = None
++        self._activo.set()
++        self._hilo = threading.Thread(target=self._bucle, name="sonic-pub", daemon=True)
++        self._hilo.start()
++        log.info(f"Publicador SONIC en tcp://{self.host}:{self.puerto} ({self.hz:.0f} Hz)")
++        return True
++
++    def iniciar_control(self, reintentos: int = 3):
++        """Pide al deploy que arranque el control en modo planner.
++
++        Es idempotente: si el control ya estaba arrancado no pasa nada. Se
++        repite porque ZMQ PUB/SUB puede perder el primer mensaje.
++        """
++        for _ in range(reintentos):
++            self._enviar(empaquetar_comando(start=True, stop=False, planner=True))
++            time.sleep(0.3)
++        log.info("Comando de inicio enviado al deploy SONIC (modo planner)")
++
++    def parada_emergencia(self):
++        """Envía `stop` al deploy (equivale a pulsar O en su terminal)."""
++        self._enviar(empaquetar_comando(start=False, stop=True, planner=True))
++        log.warning("Parada de emergencia enviada al deploy SONIC")
++
++    def cerrar(self):
++        """Vuelve a la postura de pie y cierra el publicador."""
++        if self.conectado:
++            try:
++                self.reposo(1.0)
++            except Exception:
++                pass
++        self._activo.clear()
++        if self._hilo is not None:
++            self._hilo.join(timeout=2.0)
++        self._liberar()
++        log.info("Publicador SONIC cerrado")
++
++    @property
++    def conectado(self) -> bool:
++        return self._pub is not None and self._activo.is_set()
++
++    # ── Movimiento ───────────────────────────────────────────────────
++    def enviar_seña(self, nombre_seña: str, pausa: float = 0.4) -> bool:
++        """Ejecuta una seña LSC (POSTURAS_G1). Bloquea duración + pausa."""
++        if not self.conectado:
++            log.warning("SONIC no conectado — seña descartada")
++            return False
++        if nombre_seña == "REPOSO":
++            return self.reposo(POSTURAS_G1["REPOSO"].duracion)
++        cmd = POSTURAS_G1.get(nombre_seña)
++        if cmd is None:
++            log.warning(f"Seña '{nombre_seña}' sin postura definida — se omite")
++            return False
++        log.info(f"→ SONIC: {nombre_seña} ({cmd.duracion:.1f} s)")
++        self.ir_a(comando_a_objetivos_mj(cmd), cmd.duracion)
++        time.sleep(pausa)
++        return True
++
++    def reposo(self, duracion: float = 1.5) -> bool:
++        """Brazos y torso a la postura de pie de la política."""
++        self.ir_a(dict(POSTURA_BASE_MJ), duracion)
++        return True
++
++    def ir_a(self, objetivos_mj: Dict[int, float], duracion: float, esperar: bool = True):
++        """Lleva los joints indicados (índice MuJoCo) a su ángulo con perfil coseno.
++
++        Los joints no indicados conservan su consigna. Los índices de piernas
++        se ignoran: los controla la política.
++        """
++        with self._lock_tray:
++            q_ini, _ = self._calcular(time.monotonic())
++            q_fin = q_ini.copy()
++            for mj, valor in objetivos_mj.items():
++                i = MJ_A_UB17.get(mj)
++                if i is None:
++                    continue
++                lo, hi = LIMITES_MJ[mj]
++                if not lo <= valor <= hi:
++                    log.warning(f"Joint {mj}: {valor:.2f} rad fuera de límites, se recorta")
++                q_fin[i] = min(max(valor, lo), hi)
++            self._q_from, self._q_to = q_ini, q_fin
++            self._dur = max(float(duracion), 0.05)
++            self._t0 = time.monotonic()
++            dur = self._dur
++        if esperar:
++            time.sleep(dur)
++
++    def postura_actual(self) -> Dict[int, float]:
++        """Consigna actual {índice MuJoCo: rad} del tren superior."""
++        with self._lock_tray:
++            q, _ = self._calcular(time.monotonic())
++        return {mj: float(q[i]) for i, mj in enumerate(UB17_A_MJ)}
++
++    # ── Interno ──────────────────────────────────────────────────────
++    def _calcular(self, t: float):
++        """(posición, velocidad) de los 17 GDL en el instante t. Requiere _lock_tray."""
++        s = min(max((t - self._t0) / self._dur, 0.0), 1.0)
++        delta = self._q_to - self._q_from
++        q = self._q_from + 0.5 * (1.0 - math.cos(math.pi * s)) * delta
++        if s < 1.0:
++            dq = (0.5 * math.pi * math.sin(math.pi * s) / self._dur) * delta
++        else:
++            dq = np.zeros(17)
++        return q, dq
++
++    def _enviar(self, mensaje: bytes):
++        if self._pub is None:
++            return
++        with self._lock_pub:
++            try:
++                self._pub.send(mensaje, zmq.NOBLOCK)
++            except zmq.ZMQError as e:
++                log.debug(f"ZMQ send: {e}")
++
++    def _bucle(self):
++        dt = 1.0 / self.hz
++        siguiente = time.perf_counter()
++        while self._activo.is_set():
++            with self._lock_tray:
++                q, dq = self._calcular(time.monotonic())
++            self._enviar(empaquetar_planner(q, dq))
++            siguiente += dt
++            time.sleep(max(0.0, siguiente - time.perf_counter()))
++
++    def _liberar(self):
++        with self._lock_pub:
++            if self._pub is not None:
++                self._pub.close(0)
++                self._pub = None
++            if self._ctx is not None:
++                self._ctx.term()
++                self._ctx = None
+diff --git a/voz_a_sena/gui_principal.py b/voz_a_sena/gui_principal.py
+index a772730..389e83f 100644
+--- a/voz_a_sena/gui_principal.py
++++ b/voz_a_sena/gui_principal.py
+@@ -2,13 +2,13 @@
+ Interfaz grafica del sistema Voz/Texto -> Sena LSC.
+ 
+ Permite escribir texto o usar el microfono, y muestra la traduccion
+-mientras se transmite al visor 3D y al robot G1 (si está conectado).
++mientras la sena se ejecuta en el G1 de 29 GDL dentro de MuJoCo (politica
++SONIC, ver robot/conector_sonic.py) o en el G1 compartido de la pestana Camara.
+ """
+ 
+ import logging
+ import sys
+ import threading
+-import webbrowser
+ from pathlib import Path
+ 
+ import tkinter as tk
+@@ -17,7 +17,8 @@ from tkinter import scrolledtext
+ sys.path.insert(0, str(Path(__file__).parent.parent))
+ 
+ from utils.logger import configurar_logger
+-from voz_a_sena.servidor import ServidorVozASena, PUERTO_HTTP
++from voz_a_sena.servidor import ServidorVozASena
++from robot.conector_sonic import ConectorSonic
+ 
+ log = logging.getLogger("voz_a_sena.gui")
+ 
+@@ -28,10 +29,12 @@ class VentanaVozASena:
+     def __init__(self):
+         self.servidor = ServidorVozASena()
+         self.robot = None  # ConectorG1 compartido; lo asigna app_unificada.py
++        self.sonic = None  # ConectorSonic (MuJoCo, 29 GDL); se crea al pulsar «Conectar MuJoCo»
+         self._raiz = None
+         self._contenedor = None
+         self._escuchando = False
+-        self._servidor_iniciado = False
++        self._conectando_sonic = False
++        self._lock_sonic = threading.Lock()  # las secuencias se ejecutan una tras otra
+ 
+     def ejecutar(self):
+         """Modo autónomo: crea su propia ventana y mainloop."""
+@@ -43,47 +46,78 @@ class VentanaVozASena:
+ 
+         self._contenedor = self._raiz
+         self._construir_ui()
+-
+-        log.info("Iniciando servidores HTTP y WebSocket...")
+-        self.servidor.iniciar_servidores()
+-        self._servidor_iniciado = True
+-
+-        self._raiz.after(800, self._abrir_visor)
++        self._agregar_log_inicial()
+         self._raiz.mainloop()
+ 
+     def montar_en(self, contenedor, raiz):
+         """Construye la UI de voz dentro de un contenedor externo (pestaña),
+         compartiendo la raíz de la app unificada. No crea tk.Tk() ni mainloop.
+ 
+-        El servidor HTTP/WebSocket se arranca aquí, pero el visor 3D NO se
+-        abre solo: se abre cuando el usuario pulsa el botón (evita lanzar el
+-        navegador al iniciar la app). El avatar sigue en el navegador porque
+-        es WebGL y Tkinter no lo puede incrustar.
++        Ya no se levanta el servidor HTTP/WebSocket del visor 3D del navegador:
++        las señas se ejecutan en MuJoCo (botón «Conectar MuJoCo G1»).
+         """
+         self._raiz = raiz
+         self._contenedor = contenedor
+         self._construir_ui()
+-
+-        log.info("Iniciando servidores HTTP y WebSocket (pestaña voz)...")
+-        self.servidor.iniciar_servidores()
+-        self._servidor_iniciado = True
+-        self._agregar_log("Servidor listo. Pulsa «↗ Abrir visor 3D» para ver el avatar.")
++        self._agregar_log_inicial()
+         log.info("Panel de voz montado en pestaña")
+ 
++    def _agregar_log_inicial(self):
++        self._agregar_log("Arranca MuJoCo y el deploy SONIC (docs/sonic_mujoco.md) "
++                          "y pulsa «▶ Conectar MuJoCo G1».")
++
+     def cerrar(self):
+-        """Detiene el servidor sin destruir la raíz."""
+-        try:
+-            detener = getattr(self.servidor, "detener_servidores", None)
+-            if callable(detener):
+-                detener()
+-        except Exception:
+-            pass
+-
+-    def _abrir_visor(self):
+-        url = f"http://localhost:{PUERTO_HTTP}"
+-        log.info(f"Abriendo visor 3D en {url}")
+-        webbrowser.open(url)
+-        self._agregar_log(f"Visor 3D abierto en: {url}")
++        """Cierra la conexión con MuJoCo sin destruir la raíz."""
++        sonic, self.sonic = self.sonic, None
++        if sonic is not None:
++            try:
++                sonic.cerrar()
++            except Exception:
++                pass
++
++    # ── Conexión con MuJoCo (SONIC) ──────────────────────────────────
++
++    def _alternar_sonic(self):
++        if self._conectando_sonic:
++            return
++        if self.sonic is not None and self.sonic.conectado:
++            threading.Thread(target=self._desconectar_sonic, daemon=True).start()
++        else:
++            self._conectando_sonic = True
++            self._boton_sonic.configure(state="disabled", text="Conectando…")
++            threading.Thread(target=self._conectar_sonic, daemon=True).start()
++
++    def _conectar_sonic(self):
++        sonic = ConectorSonic()
++        if not sonic.conectar():
++            self._raiz.after(0, self._sonic_fallo, sonic.error or "error desconocido")
++            return
++        sonic.iniciar_control()
++        self.sonic = sonic
++        self._raiz.after(0, self._sonic_listo)
++
++    def _desconectar_sonic(self):
++        with self._lock_sonic:  # espera a que termine la seña en curso
++            self.cerrar()
++        self._raiz.after(0, self._sonic_desconectado)
++
++    def _sonic_listo(self):
++        self._conectando_sonic = False
++        self._boton_sonic.configure(state="normal", text="■ Desconectar MuJoCo")
++        self._lbl_sonic.configure(text="● MuJoCo conectado (:5556)", fg="#86efac")
++        self._agregar_log("Publicando hacia el deploy SONIC. Si el G1 sigue colgado, "
++                          "pulsa 9 en la ventana de MuJoCo para soltarlo.")
++
++    def _sonic_fallo(self, mensaje: str):
++        self._conectando_sonic = False
++        self._boton_sonic.configure(state="normal", text="▶ Conectar MuJoCo G1")
++        self._lbl_sonic.configure(text="● MuJoCo sin conectar", fg="#bfdbfe")
++        self._agregar_log(f"[ERROR] No se pudo conectar: {mensaje}")
++
++    def _sonic_desconectado(self):
++        self._boton_sonic.configure(state="normal", text="▶ Conectar MuJoCo G1")
++        self._lbl_sonic.configure(text="● MuJoCo sin conectar", fg="#bfdbfe")
++        self._agregar_log("MuJoCo desconectado.")
+ 
+     def _construir_ui(self):
+         c_fondo = "#1a1a2e"
+@@ -102,12 +136,18 @@ class VentanaVozASena:
+         tk.Label(encabezado, text="Voz / Texto  →  Sena  →  Robot G1", bg=c_acento,
+                  fg="#bfdbfe", font=("Segoe UI", 10)).pack(side="left", pady=14)
+ 
+-        boton_visor = tk.Button(
+-            encabezado, text="↗ Abrir visor 3D", bg="white", fg=c_acento,
++        self._boton_sonic = tk.Button(
++            encabezado, text="▶ Conectar MuJoCo G1", bg="white", fg=c_acento,
+             relief="flat", font=("Segoe UI", 9, "bold"), padx=10,
+-            cursor="hand2", command=self._abrir_visor,
++            cursor="hand2", command=self._alternar_sonic,
+         )
+-        boton_visor.pack(side="right", padx=16, pady=14)
++        self._boton_sonic.pack(side="right", padx=(8, 16), pady=14)
++
++        self._lbl_sonic = tk.Label(
++            encabezado, text="● MuJoCo sin conectar", bg=c_acento, fg="#bfdbfe",
++            font=("Segoe UI", 9),
++        )
++        self._lbl_sonic.pack(side="right", pady=14)
+ 
+         # Panel de entrada de texto
+         panel_texto = tk.Frame(cont, bg=c_panel, padx=20, pady=16)
+@@ -226,12 +266,15 @@ class VentanaVozASena:
+             self._lbl_secuencia.configure(text="  →  ".join(señas))
+             self._agregar_log(f"Secuencia generada: {' -> '.join(señas)}")
+ 
+-            # Enviar también al robot G1 (simulador o real) si está conectado
+-            if self.robot is not None and self.robot.conectado:
++            # Ejecutar en el G1: primero MuJoCo/SONIC; si no, el G1 de la pestaña Cámara
++            if self.sonic is not None and self.sonic.conectado:
++                threading.Thread(target=self._enviar_a_sonic, args=(señas,),
++                                 daemon=True).start()
++            elif self.robot is not None and self.robot.conectado:
+                 threading.Thread(target=self._enviar_al_robot, args=(señas,),
+                                  daemon=True).start()
+-            elif self.robot is not None:
+-                self._agregar_log("Robot G1 no conectado: pulsa 'Conectar G1' en la pestaña Cámara")
++            else:
++                self._agregar_log("Sin simulación conectada: pulsa «▶ Conectar MuJoCo G1»")
+ 
+             no_reconocidas = resultado.get("no_reconocidas", [])
+             if no_reconocidas:
+@@ -251,6 +294,18 @@ class VentanaVozASena:
+             if no_reconocidas:
+                 self._mostrar_boton_ensenar(" ".join(no_reconocidas))
+ 
++    def _enviar_a_sonic(self, señas):
++        """Ejecuta la secuencia en el G1 de MuJoCo y vuelve a la postura de pie."""
++        with self._lock_sonic:
++            sonic = self.sonic
++            if sonic is None or not sonic.conectado:
++                return
++            for s in señas:
++                sonic.enviar_seña(s)
++            sonic.reposo(1.2)
++        self._raiz.after(0, self._agregar_log,
++                         f"MuJoCo G1: ejecutada {' -> '.join(señas)}")
++
+     def _enviar_al_robot(self, señas):
+         """Ejecuta la secuencia en el G1, una seña tras otra (hilo aparte)."""
+         for s in señas:
+@@ -324,6 +379,7 @@ class VentanaVozASena:
+ 
+     def _cerrar(self):
+         log.info("Cerrando aplicacion...")
++        self.cerrar()
+         self._raiz.quit()
+         self._raiz.destroy()
+ 

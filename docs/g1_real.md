@@ -1,0 +1,147 @@
+# G1 físico: ejecutar las señas con el robot real
+
+La app publica las posturas de torso y brazos por ZMQ (:5556) y el deploy de SONIC mueve el
+robot. Es **el mismo circuito que con MuJoCo**; solo cambia a quién le habla el deploy:
+
+```
+Simulación:  app ──ZMQ :5556──▶ deploy ... sim  ──▶ MuJoCo
+Robot real:  app ──ZMQ :5556──▶ deploy ... enp131s0 ──DDS (cable)──▶ G1 (motores)
+```
+
+El deploy corre en la **PC 5062robotika** (ya compilado y probado en simulación), por el cable de
+red del robot. No se usa MuJoCo (Terminal 1) ni el Jetson. Para correr el deploy en el Jetson,
+como en el notebook `sim2real_v1`, ver el apartado «Variante: deploy en el Jetson».
+
+> **Estado:** el software está probado en el sandbox contra un deploy simulado (mensajes ZMQ,
+> escalado, límite de velocidad, PARAR y bloqueo). **No se ha probado todavía con el robot.**
+> Haz la primera prueba en el arnés y con alguien en la tecla `O`.
+
+## Qué agrega la app en modo real
+
+| Elemento | Qué hace |
+|---|---|
+| `--sonic-real` | Botón «Conectar G1 real» con checklist de seguridad; sin aceptar no se envía nada |
+| Amplitud 60 % | Cada seña se reduce al 60 % respecto a la postura de pie (`--sonic-escala`) |
+| Tiempos x1.5 | Cada tramo dura 1.5 veces más (`--sonic-tiempo`) |
+| Tope 1.2 rad/s | Si un tramo pide más velocidad, se alarga (`--sonic-vel-max`) |
+| Botón **■ PARAR** | Envía `stop` al deploy, congela la consigna y bloquea nuevas señas |
+| Cámara → G1 | La seña detectada por la cámara la ejecuta el G1 si la confianza es ≥ 80 % (`--sonic-confianza`); mientras ejecuta otra, las nuevas se descartan |
+
+Con la app cerrada o colgada, el deploy vuelve a IDLE si pasa más de 1 s sin recibir `planner`
+(el robot sigue de pie y deja de seguir los brazos). La tecla **`O`** en la terminal del deploy es
+el paro de emergencia y siempre manda.
+
+## Antes de empezar (checklist físico)
+
+1. G1 **en arnés o sostenido**, con espacio libre alrededor, batería cargada.
+2. Una persona **con la mano en la tecla `O`** de la terminal del deploy y otra con el control
+   remoto de Unitree a mano.
+3. Robot preparado para control de bajo nivel según el manual de Unitree de tu firmware
+   (modo depuración / damping; el controlador de movimiento de fábrica no debe estar activo).
+   Cierra cualquier otra aplicación que controle al robot (Pico, `xr_teleoperate`, app de Unitree).
+4. MuJoCo **apagado** (`pgrep -af run_sim_loop` sin salida): comparte puertos y confunde.
+5. Red: PC por cable.
+   ```bash
+   ping -I enp131s0 -c 3 192.168.123.161     # PC1 del G1, 0 % de pérdida
+   ```
+
+## Arranque
+
+### T-A (opcional): cámara del robot, en el PC2 por SSH
+```bash
+ssh unitree@192.168.123.164
+cd ~/teleimager && teleimager-server
+```
+
+### T-2: deploy SONIC en modo real
+```bash
+cd /home/udirobotika/DURVVIN/SIM2SIM/blea/GR00T-WholeBodyControl/gear_sonic_deploy
+source scripts/setup_env.sh
+./deploy.sh --input-type zmq_manager enp131s0
+```
+- Se indica la interfaz **por nombre** (`enp131s0`) en lugar de `real`: `real` busca la primera
+  interfaz 192.168.123.x y la PC también tiene el Wi-Fi en esa red.
+- Debe decir `Environment: real` y avisar «This will start the REAL robot control system».
+  Responde `y` solo si el checklist está cumplido.
+- Espera `Init Done`. Hasta ahí no mueve nada; el control empieza cuando la app envía `start`.
+
+### T-3: app en modo real
+```bash
+cd ~/LSC-Mafe && source venv/bin/activate
+python app_unificada.py --sin-robot --v2 --sonic-real \
+    --camara-g1 --camara-g1-puerto 55556           # la cámara externa es opcional
+```
+1. Pestaña **Voz / Texto → Seña** → **▶ Conectar G1 real**.
+2. Lee el checklist y acepta: se envía `start` y la política toma el control.
+3. Debe verse `● G1 real conectado (:5556)` y, en T-2, `[ZMQManager] Planner enabled`.
+
+## Primeras pruebas, de menos a más riesgo
+
+| Etapa | Condición | Qué hacer |
+|---|---|---|
+| 1 | Arnés, pies en el aire | `python -m robot.probar_sonic --real articulaciones` (con la app cerrada) |
+| 2 | Arnés, pies apoyados y cable flojo | `python -m robot.probar_sonic --real Hola Gracias` |
+| 3 | Misma condición | La app: escribe «hola», luego frases de varias señas |
+| 4 | Misma condición | Seña por cámara: hazla frente a la OBSBOT |
+| 5 | De pie con ayudante cerca | Solo cuando las etapas 1-4 salgan sin tirones |
+
+Antes de subir amplitud o velocidad, hazlo de a poco, por ejemplo:
+`--sonic-escala 0.8 --sonic-tiempo 1.2`. No uses valores menores a los de simulación
+(`--sonic-tiempo` no puede ser < 1 en modo real).
+
+## Si algo se ve mal
+1. **Tecla `O`** en la terminal del deploy (paro de emergencia).
+2. Botón **■ PARAR** de la app.
+3. Control remoto de Unitree.
+
+Tras un PARAR el deploy termina: para reanudar, reinicia el deploy, pulsa Desconectar y Conectar.
+
+## Problemas frecuentes
+
+| Síntoma | Causa probable | Qué hacer |
+|---|---|---|
+| T-2: `LowState is not available` | El deploy no recibe el estado del robot | Revisa cable, `ping -I enp131s0 192.168.123.161` y que no esté otra app controlando |
+| T-2 usa el Wi-Fi | Se lanzó con `real` | Indica la interfaz: `enp131s0` |
+| `No se pudo abrir el puerto 5556` | Otro proceso lo usa (MuJoCo o una app anterior) | `pkill -f app_unificada; pkill -f run_sim_loop` |
+| El robot no sigue los brazos | Faltó `start` o la app murió >1 s | Desconectar y Conectar en la app |
+| La cámara detecta pero el G1 no se mueve | Confianza < 80 % o ya ejecutaba otra seña | Mira el registro; baja `--sonic-confianza` con cuidado |
+| La seña se ve pequeña o lenta | Es el modo real (60 % y x1.5) | Sube de a poco `--sonic-escala` / baja `--sonic-tiempo` |
+
+## Variante: deploy en el Jetson (como el notebook `sim2real_v1`)
+El notebook entrena y despliega **una política por seña** con `--input-type zmq` en el Jetson
+(`eth0`). Para usar nuestra app (política general con planner, cualquier seña) en el Jetson:
+
+1. Copiar al Jetson los ONNX generales (`policy/release/model_encoder.onnx`, `model_decoder.onnx`),
+   el planner compatible con TRT 8.5 (`planner_sonic_opset14_cf2.onnx`) y `observation_config.yaml`
+   parcheado, como en §8.4 del notebook.
+2. Lanzar allí el binario con `--input-type zmq_manager --zmq-host 192.168.123.222`
+   (IP de la PC en el cable) y la interfaz `eth0`.
+3. En la PC, la app queda igual (`--sonic-real`); abre el puerto 5556 hacia el Jetson.
+
+Esta variante no está probada con nuestra app y depende de que el build del Jetson esté completo.
+
+## Micrófono (voz) — usa el del robot
+
+Con `--sonic-real` o `--camara-g1` la voz se captura del **micrófono del G1** (UDP multicast
+`239.168.123.161:5555`, PCM 16 kHz mono) y, si no llega audio, cae al micrófono de la PC
+(modo `auto`). Opciones de `app_unificada.py`:
+
+| Opción | Efecto |
+|---|---|
+| `--mic auto` (defecto) | G1 si hay `--sonic-real`/`--camara-g1` (con respaldo a la PC); si no, PC |
+| `--mic g1` | Solo el del robot; si no llega audio, muestra el error |
+| `--mic pc` | Solo el de la PC |
+| `--mic-g1-ip IP` | IP de la PC en la red 192.168.123.x (si no se detecta sola) |
+
+Diagnóstico (antes de usar la app):
+
+```bash
+python -m voz_a_sena.probar_microfono g1 --ip 192.168.123.X   # paquetes y nivel del audio del robot
+python -m voz_a_sena.probar_microfono pc                       # lista micrófonos de la PC
+python -m voz_a_sena.probar_microfono g1 --reconocer           # además transcribe una frase
+```
+
+Notas: el formato del audio del G1 proviene de proyectos de terceros (no de la documentación
+oficial) y la recepción en una PC externa no está verificada; si `probar_microfono g1` da 0
+paquetes, revisar cable/IP en 192.168.123.x y firewall UDP 5555. El reconocimiento (Google)
+requiere internet.

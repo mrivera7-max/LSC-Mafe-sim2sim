@@ -18,6 +18,11 @@ class Configuracion:
         self.camara_ancho = 1280
         self.camara_alto = 720
         self.camara_fps = 30
+        # Fuente de video: "usb" (cv2.VideoCapture) o "g1" (cámara de cabeza del robot por ZMQ)
+        self.camara_fuente = "usb"
+        self.camara_g1_host = "192.168.123.164"   # PC2 del G1 (teleimager-server)
+        self.camara_g1_puerto = 55555
+        self.camara_g1_binocular = None           # None = automático (recorta solo si la imagen es estéreo); True/False fuerza
 
         # Modelo
         self.modelo_tipo = "mediapipe"
