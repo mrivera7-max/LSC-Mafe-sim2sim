@@ -392,7 +392,8 @@ class VentanaPrincipal:
         self._robot.on_estado_cambio = self._on_estado_robot
         self._robot.on_comando_enviado = self._on_comando_robot
 
-    def _iniciar_camara(self):
+    def _iniciar_camara(self) -> bool:
+        """Abre la cámara y arranca el reconocimiento. True si quedó en marcha."""
         import cv2
         if getattr(self.config, "camara_fuente", "usb") == "g1":
             from robot.camara_g1 import CamaraG1
@@ -401,7 +402,7 @@ class VentanaPrincipal:
             if not self._cap.isOpened():
                 messagebox.showerror("Cámara del G1", self._cap.error or "No se pudo abrir la cámara del G1.")
                 self._cap = None
-                return
+                return False
             nombre_cam = f"del G1 ({self.config.camara_g1_host})"
         else:
             self._cap = cv2.VideoCapture(self.config.camara_idx)
@@ -409,7 +410,9 @@ class VentanaPrincipal:
                 messagebox.showerror("Error de cámara",
                                      f"No se pudo abrir la cámara {self.config.camara_idx}.\n"
                                      "Verifica que esté conectada.")
-                return
+                self._cap.release()
+                self._cap = None
+                return False
             self._cap.set(cv2.CAP_PROP_FRAME_WIDTH,  self.config.camara_ancho)
             self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.camara_alto)
             self._cap.set(cv2.CAP_PROP_FPS,          self.config.camara_fps)
@@ -419,12 +422,15 @@ class VentanaPrincipal:
             messagebox.showerror("Error de modelo",
                                  "No se pudo iniciar MediaPipe.\n"
                                  "Instala con: pip install mediapipe")
-            return
+            self._cap.release()
+            self._cap = None
+            return False
 
         self._hilo_camara = threading.Thread(target=self._bucle_camara, daemon=True)
         self._hilo_camara.start()
         self._actualizar_video()
         log.info(f"Cámara {nombre_cam} iniciada")
+        return True
 
     def _detener_camara(self):
         self._activa = False
@@ -560,7 +566,11 @@ class VentanaPrincipal:
             self._lbl_video.configure(image="", text="Cámara detenida", fg="#555")
         else:
             self._activa = True
-            self._iniciar_camara()
+            if not self._iniciar_camara():       # falló: la interfaz sigue en «inactiva»
+                self._activa = False
+                self._btn_camara.configure(text="▶  Iniciar cámara", bg="#0ea5e9")
+                self._lbl_status_cam.configure(text="● Cámara: inactiva", fg=c["rojo"])
+                return
             self._btn_camara.configure(text="■  Detener cámara", bg=c["rojo"])
             self._lbl_status_cam.configure(text="● Cámara: activa", fg=c["verde"])
 
