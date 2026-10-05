@@ -157,7 +157,7 @@ terminales del deploy ni de MuJoCo:
   (`enp131s0`; cámbiala con `--iface`), esperas a «Init done» (confirmas en esa terminal) y la app
   muestra el checklist de seguridad antes de enviar START. El micrófono pasa al del G1.
 
-Si el botón dice **▶ Enlazar …**, el deploy ya está abierto y solo falta conectar. **■ Desconectar**
+Si el botón dice **▶ Enlazar …**, el deploy ya está abierto y solo falta conectar. **✖ Cerrar simulación** termina MuJoCo y su deploy (solo en simulación; el robot real se detiene con `O`/PARAR). **■ Desconectar**
 corta el enlace sin cerrar las terminales. Tras **■ PARAR** hay que cerrar la terminal del deploy y
 volver a pulsar el botón.
 

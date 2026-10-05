@@ -149,3 +149,14 @@ class LanzadorSonic:
 
     def hay_log(self, real: bool) -> bool:
         return shutil.which("script") is not None
+
+    def cerrar_simulacion(self) -> str:
+        """Termina MuJoCo y el deploy de la simulación. Devuelve qué proceso se cerró."""
+        cerrados = []
+        for etiqueta, patron in (("MuJoCo", "run_sim_loop.py"),
+                                 ("deploy", "g1_deploy_onnx_ref"),
+                                 ("deploy.sh", "gear_sonic_deploy/deploy.sh|\\./deploy.sh --input-type zmq_manager sim")):
+            r = subprocess.run(["pkill", "-f", patron], capture_output=True)
+            if r.returncode == 0:
+                cerrados.append(etiqueta)
+        return ", ".join(cerrados) if cerrados else "nada (ya estaba cerrada)"

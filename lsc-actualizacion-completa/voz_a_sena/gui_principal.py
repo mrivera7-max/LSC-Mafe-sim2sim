@@ -128,6 +128,8 @@ class VentanaVozASena:
             text="▶ Enlazar robot real" if self._lanzado[True] else "🤖 Conectar robot real",
             state="disabled" if busy else "normal")
         self._boton_sonic.configure(state="normal" if self._conectado() else "disabled")
+        self._boton_cerrar_sim.configure(
+            state="normal" if self._lanzado[False] and not self._conectando_sonic else "disabled")
 
     def _pulsar(self, real: bool):
         """Botón de simulación (real=False) o de robot real (real=True)."""
@@ -203,6 +205,26 @@ class VentanaVozASena:
         self._boton_real.configure(state="disabled")
         self._lbl_sonic.configure(text="● Conectando…", fg="#fde68a")
         threading.Thread(target=self._conectar_sonic, daemon=True).start()
+
+    def _cerrar_simulacion(self):
+        """Desconecta (si hace falta) y cierra MuJoCo y el deploy de la simulación."""
+        if self._conectando_sonic:
+            return
+        self._esperando = False
+        def tarea():
+            if self._conectado() and not self.modo_real:
+                with self._lock_sonic:
+                    self.cerrar()
+            msg = self.lanzador.cerrar_simulacion()
+            self._raiz.after(0, self._simulacion_cerrada, msg)
+        threading.Thread(target=tarea, daemon=True).start()
+
+    def _simulacion_cerrada(self, msg: str):
+        self._lanzado[False] = False
+        self._lbl_sonic.configure(text="● Sin conectar", fg="#bfdbfe")
+        self._boton_parar.configure(state="disabled")
+        self._refrescar_botones()
+        self._agregar_log(f"Simulación cerrada: {msg}. Cierra también las terminales vacías.")
 
     def _alternar_sonic(self):
         """Botón «Desconectar»."""
@@ -326,7 +348,12 @@ class VentanaVozASena:
             barra, text="🤖 Conectar robot real", bg="#f59e0b", fg="#1c1917", relief="flat",
             font=("Segoe UI", 10, "bold"), pady=8, cursor="hand2",
             command=lambda: self._pulsar(True))
-        self._boton_real.pack(side="left", fill="x", expand=True, padx=(6, 0))
+        self._boton_real.pack(side="left", fill="x", expand=True, padx=(6, 6))
+        self._boton_cerrar_sim = tk.Button(
+            barra, text="✖ Cerrar simulación", bg="#475569", fg="white", relief="flat",
+            font=("Segoe UI", 10, "bold"), pady=8, cursor="hand2", state="disabled",
+            command=self._cerrar_simulacion)
+        self._boton_cerrar_sim.pack(side="left", padx=(0, 0))
 
         # Panel de entrada de texto
         panel_texto = tk.Frame(cont, bg=c_panel, padx=20, pady=16)
