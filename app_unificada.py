@@ -139,9 +139,14 @@ def parsear_args():
                    help="Confianza mínima de la seña detectada por cámara para que el G1 la ejecute (default 0.8)")
     p.add_argument("--mic", choices=["auto", "pc", "g1"], default="auto",
                    help="Micrófono de voz: g1 = robot (multicast), pc = esta PC, "
-                        "auto = G1 con --sonic-real/--camara-g1 (con respaldo a la PC), si no PC")
+                        "auto = G1 al usar el robot real (con respaldo a la PC), PC en simulación")
     p.add_argument("--mic-g1-ip", default=None, metavar="IP",
                    help="IP de esta PC en la red del robot (192.168.123.x) para recibir el audio")
+    p.add_argument("--gr00t-dir", default=None, metavar="RUTA",
+                   help="Carpeta GR00T-WholeBodyControl (para abrir MuJoCo/deploy desde la app). "
+                        "También vale la variable GR00T_DIR")
+    p.add_argument("--iface", default=None, metavar="NOMBRE",
+                   help="Interfaz de red cableada del robot para el deploy real (defecto enp131s0)")
     p.add_argument("--config", type=str, default="config.json")
     p.add_argument("--log-nivel", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                    default="INFO")
@@ -174,11 +179,9 @@ def main():
     sonic_opciones = dict(modo_real=args.sonic_real, escala=args.sonic_escala,
                           factor_tiempo=args.sonic_tiempo, vel_max=args.sonic_vel_max,
                           confianza_min=args.sonic_confianza)
-    mic = args.mic
-    if mic == "auto" and not (args.sonic_real or args.camara_g1):
-        mic = "pc"
-    sonic_opciones.update(mic=mic, mic_iface_ip=args.mic_g1_ip)
-    log.info(f"Micrófono de voz: {mic}")
+    sonic_opciones.update(mic=args.mic, mic_iface_ip=args.mic_g1_ip,
+                          gr00t_dir=args.gr00t_dir, interfaz=args.iface)
+    log.info(f"Micrófono de voz: {args.mic} (auto = G1 con robot real, PC con simulación)")
     app = AppUnificada(config, sonic_opciones)
     app.ejecutar()
 

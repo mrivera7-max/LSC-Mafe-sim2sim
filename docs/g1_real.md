@@ -145,3 +145,23 @@ Notas: el formato del audio del G1 proviene de proyectos de terceros (no de la d
 oficial) y la recepción en una PC externa no está verificada; si `probar_microfono g1` da 0
 paquetes, revisar cable/IP en 192.168.123.x y firewall UDP 5555. El reconocimiento (Google)
 requiere internet.
+
+## Arranque con los botones de la app (simulación o robot real)
+
+La pestaña **Voz / Texto → Seña** tiene dos botones y ya no hace falta abrir a mano las
+terminales del deploy ni de MuJoCo:
+
+- **🖥 Abrir simulación MuJoCo**: abre MuJoCo (T1) y el deploy `sim` (T2) en terminales, espera
+  «Init done» y enlaza solo. Después sueltas al G1 con `7` ×2 y `9` en la ventana de MuJoCo.
+- **🤖 Conectar robot real**: pide confirmar, abre el deploy con la interfaz del cable
+  (`enp131s0`; cámbiala con `--iface`), esperas a «Init done» (confirmas en esa terminal) y la app
+  muestra el checklist de seguridad antes de enviar START. El micrófono pasa al del G1.
+
+Si el botón dice **▶ Enlazar …**, el deploy ya está abierto y solo falta conectar. **■ Desconectar**
+corta el enlace sin cerrar las terminales. Tras **■ PARAR** hay que cerrar la terminal del deploy y
+volver a pulsar el botón.
+
+Ruta del repositorio GR00T: `--gr00t-dir RUTA` o variable `GR00T_DIR` (por defecto
+`/home/udirobotika/DURVVIN/SIM2SIM/blea/GR00T-WholeBodyControl`). Requiere `gnome-terminal`
+(o xterm/konsole) y el comando `script`. Si no se puede abrir una terminal, la app escribe en el
+registro los comandos para ejecutarlos a mano.
