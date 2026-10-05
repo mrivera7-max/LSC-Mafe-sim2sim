@@ -165,3 +165,10 @@ Ruta del repositorio GR00T: `--gr00t-dir RUTA` o variable `GR00T_DIR` (por defec
 `/home/udirobotika/DURVVIN/SIM2SIM/blea/GR00T-WholeBodyControl`). Requiere `gnome-terminal`
 (o xterm/konsole) y el comando `script`. Si no se puede abrir una terminal, la app escribe en el
 registro los comandos para ejecutarlos a mano.
+
+### Posición de la ventana de MuJoCo
+La app mueve la ventana de MuJoCo al abrirse (por defecto esquina superior izquierda, `0,0`):
+`--mujoco-pos X,Y` y `--mujoco-tam ANCHOxALTO` (por ejemplo `--mujoco-pos 40,80 --mujoco-tam 960x600`;
+`--mujoco-pos no` la deja donde el sistema la ponga). Requiere `sudo apt install xdotool` (o `wmctrl`)
+y una sesión X11; con Wayland puro hay que arrastrar la ventana a mano.
+Si hay ventanas de MuJoCo duplicadas: `pkill -f run_sim_loop.py; pkill -f g1_deploy_onnx_ref`.

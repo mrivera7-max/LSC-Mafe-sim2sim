@@ -31,7 +31,8 @@ class VentanaVozASena:
     def __init__(self, modo_real: bool = False, escala=None, factor_tiempo=None,
                  vel_max=None, confianza_min: float = 0.8,
                  mic: str = "pc", mic_iface_ip: str = None,
-                 gr00t_dir: str = None, interfaz: str = None):
+                 gr00t_dir: str = None, interfaz: str = None,
+                 mujoco_pos=(0, 0), mujoco_tam=None):
         """
         modo_real      True: el deploy SONIC mueve el G1 FÍSICO (no MuJoCo). Exige confirmar
                        el checklist de seguridad y limita amplitud y velocidad de las señas.
@@ -45,7 +46,7 @@ class VentanaVozASena:
         self.confianza_min = confianza_min
         self.mic = mic
         self._mic_iface_ip = mic_iface_ip
-        self.lanzador = LanzadorSonic(gr00t_dir, interfaz)
+        self.lanzador = LanzadorSonic(gr00t_dir, interfaz, mujoco_pos, mujoco_tam)
         self._lanzado = {False: False, True: False}   # ¿ya se abrió la sim / el deploy real?
         self._esperando = False
         self.servidor = ServidorVozASena(
