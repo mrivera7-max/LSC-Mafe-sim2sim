@@ -121,7 +121,7 @@ def parsear_args():
                    help="Usar reconocedor v2 (secuencial mano+cara, recomendado)")
     p.add_argument("--camara", type=int, default=0, help="Índice de cámara")
     p.add_argument("--camara-g1", nargs="?", const="192.168.123.164", metavar="IP",
-                   help="Usar la cámara de cabeza del G1 (teleimager-server) en lugar de la USB; IP del PC2 (default 192.168.123.164)")
+                   help="IP del PC2 del G1 (teleimager-server) para el botón «Cámara G1» (default 192.168.123.164)")
     p.add_argument("--camara-g1-puerto", type=int, default=None, metavar="N",
                    help="Puerto ZMQ de la cámara en teleimager (default 55555; una cámara adicional suele ser 55556)")
     p.add_argument("--camara-g1-mono", action="store_true",
@@ -179,12 +179,12 @@ def main():
     config = Configuracion(args.config)
     config.camara_idx = args.camara
     if args.camara_g1:
-        config.camara_fuente = "g1"
         config.camara_g1_host = args.camara_g1
-        if args.camara_g1_puerto:
-            config.camara_g1_puerto = args.camara_g1_puerto
-        if args.camara_g1_mono:
-            config.camara_g1_binocular = False
+    # Puerto y modo mono valen para el botón «Cámara G1» aunque no se pase --camara-g1
+    if args.camara_g1_puerto:
+        config.camara_g1_puerto = args.camara_g1_puerto
+    if args.camara_g1_mono:
+        config.camara_g1_binocular = False
     config.robot_activo = not args.sin_robot
     config.usar_v2 = args.v2 or config.usar_v2
 

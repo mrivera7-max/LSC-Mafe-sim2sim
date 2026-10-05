@@ -165,3 +165,20 @@ Ruta del repositorio GR00T: `--gr00t-dir RUTA` o variable `GR00T_DIR` (por defec
 `/home/udirobotika/DURVVIN/SIM2SIM/blea/GR00T-WholeBodyControl`). Requiere `gnome-terminal`
 (o xterm/konsole) y el comando `script`. Si no se puede abrir una terminal, la app escribe en el
 registro los comandos para ejecutarlos a mano.
+
+### Posición de la ventana de MuJoCo
+La app mueve la ventana de MuJoCo al abrirse (por defecto esquina superior izquierda, `0,0`):
+`--mujoco-pos X,Y` y `--mujoco-tam ANCHOxALTO` (por ejemplo `--mujoco-pos 40,80 --mujoco-tam 960x600`;
+`--mujoco-pos no` la deja donde el sistema la ponga). Requiere `sudo apt install xdotool` (o `wmctrl`)
+y una sesión X11; con Wayland puro hay que arrastrar la ventana a mano.
+Si hay ventanas de MuJoCo duplicadas: `pkill -f run_sim_loop.py; pkill -f g1_deploy_onnx_ref`.
+
+## Cámara: botones «Cámara PC» y «Cámara G1»
+En la pestaña **📷 Cámara → Seña**, arriba a la derecha, hay dos botones. Al abrir la app no hay cámara activa:
+- **📷 Cámara PC**: webcam USB (índice `--camara N`, por defecto 0).
+- **🤖 Cámara G1**: cámara por `teleimager-server` del PC2 (requiere la Terminal A). IP, puerto y modo
+  mono con `--camara-g1 [IP]`, `--camara-g1-puerto 55556`, `--camara-g1-mono` (ya no hace falta
+  `--camara-g1` para que funcione el botón).
+Pulsar el botón de la cámara activa la detiene; pulsar el otro cambia de cámara sin reiniciar la app. Si la
+cámara no abre, queda «inactiva» con el aviso del motivo. El botón antiguo «⚡ Conectar G1» solo aparece
+si la app se abre sin `--sin-robot`; el G1 de SONIC se conecta desde la pestaña Voz / Texto → Seña.

@@ -121,7 +121,7 @@ def parsear_args():
                    help="Usar reconocedor v2 (secuencial mano+cara, recomendado)")
     p.add_argument("--camara", type=int, default=0, help="Índice de cámara")
     p.add_argument("--camara-g1", nargs="?", const="192.168.123.164", metavar="IP",
-                   help="Usar la cámara de cabeza del G1 (teleimager-server) en lugar de la USB; IP del PC2 (default 192.168.123.164)")
+                   help="IP del PC2 del G1 (teleimager-server) para el botón «Cámara G1» (default 192.168.123.164)")
     p.add_argument("--camara-g1-puerto", type=int, default=None, metavar="N",
                    help="Puerto ZMQ de la cámara en teleimager (default 55555; una cámara adicional suele ser 55556)")
     p.add_argument("--camara-g1-mono", action="store_true",
@@ -147,10 +147,26 @@ def parsear_args():
                         "También vale la variable GR00T_DIR")
     p.add_argument("--iface", default=None, metavar="NOMBRE",
                    help="Interfaz de red cableada del robot para el deploy real (defecto enp131s0)")
+    p.add_argument("--mujoco-pos", default="0,0", metavar="X,Y",
+                   help="Posición de la ventana de MuJoCo en pantalla (defecto 0,0 = esquina "
+                        "superior izquierda; 'no' la deja donde el sistema la ponga). Requiere xdotool")
+    p.add_argument("--mujoco-tam", default=None, metavar="ANCHOxALTO",
+                   help="Tamaño de la ventana de MuJoCo, p. ej. 960x600")
     p.add_argument("--config", type=str, default="config.json")
     p.add_argument("--log-nivel", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                    default="INFO")
     return p.parse_args()
+
+
+def _par(texto, sep, nombre):
+    """'a,b' o 'axb' -> (a, b); None / 'no' -> None."""
+    if texto is None or texto.strip().lower() in ("no", "ninguno", ""):
+        return None
+    try:
+        a, b = texto.lower().split(sep)
+        return int(a), int(b)
+    except ValueError:
+        raise SystemExit(f"{nombre}: formato inválido ({texto!r}), esperaba dos números separados por «{sep}»")
 
 
 def main():
@@ -163,12 +179,12 @@ def main():
     config = Configuracion(args.config)
     config.camara_idx = args.camara
     if args.camara_g1:
-        config.camara_fuente = "g1"
         config.camara_g1_host = args.camara_g1
-        if args.camara_g1_puerto:
-            config.camara_g1_puerto = args.camara_g1_puerto
-        if args.camara_g1_mono:
-            config.camara_g1_binocular = False
+    # Puerto y modo mono valen para el botón «Cámara G1» aunque no se pase --camara-g1
+    if args.camara_g1_puerto:
+        config.camara_g1_puerto = args.camara_g1_puerto
+    if args.camara_g1_mono:
+        config.camara_g1_binocular = False
     config.robot_activo = not args.sin_robot
     config.usar_v2 = args.v2 or config.usar_v2
 
@@ -180,7 +196,9 @@ def main():
                           factor_tiempo=args.sonic_tiempo, vel_max=args.sonic_vel_max,
                           confianza_min=args.sonic_confianza)
     sonic_opciones.update(mic=args.mic, mic_iface_ip=args.mic_g1_ip,
-                          gr00t_dir=args.gr00t_dir, interfaz=args.iface)
+                          gr00t_dir=args.gr00t_dir, interfaz=args.iface,
+                          mujoco_pos=_par(args.mujoco_pos, ",", "--mujoco-pos"),
+                          mujoco_tam=_par(args.mujoco_tam, "x", "--mujoco-tam"))
     log.info(f"Micrófono de voz: {args.mic} (auto = G1 con robot real, PC con simulación)")
     app = AppUnificada(config, sonic_opciones)
     app.ejecutar()

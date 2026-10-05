@@ -16,6 +16,8 @@ import re
 import shlex
 import shutil
 import subprocess
+import threading
+import time
 from pathlib import Path
 from typing import List, Optional
 
@@ -30,7 +32,11 @@ _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 
 class LanzadorSonic:
-    def __init__(self, directorio: Optional[str] = None, interfaz: Optional[str] = None):
+    def __init__(self, directorio: Optional[str] = None, interfaz: Optional[str] = None,
+                 posicion: Optional[tuple] = (0, 0), tamano: Optional[tuple] = None):
+        """posicion (x, y) y tamano (ancho, alto) de la ventana de MuJoCo; None = no tocarla."""
+        self.posicion = posicion
+        self.tamano = tamano
         self.directorio = Path(directorio or os.environ.get("GR00T_DIR") or DIR_DEFECTO).expanduser()
         self.interfaz = interfaz or INTERFAZ_DEFECTO
         self.error: Optional[str] = None
@@ -118,8 +124,10 @@ class LanzadorSonic:
             return False
         try:
             if not real:
-                if not self.abrir_terminal("LSC · MuJoCo (T1)", self.comando_sim()):
+                if not self.abrir_terminal("LSC · Simulador (T1)", self.comando_sim()):
                     return False
+                if self.posicion is not None:
+                    threading.Thread(target=self.posicionar_ventana, daemon=True).start()
             return self.abrir_terminal(
                 "LSC · Deploy SONIC " + ("REAL" if real else "sim") + " (T2)",
                 self.comando_deploy(real), log_nombre="deploy_real" if real else "deploy_sim")
@@ -160,3 +168,38 @@ class LanzadorSonic:
             if r.returncode == 0:
                 cerrados.append(etiqueta)
         return ", ".join(cerrados) if cerrados else "nada (ya estaba cerrada)"
+
+    def posicionar_ventana(self, esperar: float = 60.0) -> bool:
+        """Mueve (y opcionalmente redimensiona) la ventana de MuJoCo cuando aparece (X11).
+
+        Usa xdotool o, si no está, wmctrl. Con Wayland puro no funciona: arrastra la ventana a mano.
+        """
+        x, y = self.posicion
+        w, h = self.tamano if self.tamano else (None, None)
+        xdotool, wmctrl = shutil.which("xdotool"), shutil.which("wmctrl")
+        if not (xdotool or wmctrl):
+            log.warning("Para colocar la ventana de MuJoCo instala xdotool: sudo apt install xdotool")
+            return False
+        fin = time.time() + esperar
+        while time.time() < fin:
+            time.sleep(1.0)
+            try:
+                if xdotool:
+                    r = subprocess.run([xdotool, "search", "--name", "^MuJoCo"],
+                                       capture_output=True, text=True, timeout=5)
+                    ids = r.stdout.split()
+                    if not ids:
+                        continue
+                    for wid in ids:
+                        subprocess.run([xdotool, "windowmove", wid, str(x), str(y)], timeout=5)
+                        if w and h:
+                            subprocess.run([xdotool, "windowsize", wid, str(w), str(h)], timeout=5)
+                    return True
+                geom = f"0,{x},{y},{w or -1},{h or -1}"
+                r = subprocess.run([wmctrl, "-r", "MuJoCo", "-e", geom], capture_output=True, timeout=5)
+                if r.returncode == 0:
+                    return True
+            except (OSError, subprocess.SubprocessError):
+                return False
+        log.warning("No encontré la ventana de MuJoCo para colocarla.")
+        return False

@@ -47,6 +47,8 @@ class VentanaPrincipal:
         self._reconocedor = None
         self._robot = None
         self._cap = None
+        self._gen_video = 0              # invalida el bucle de dibujo anterior al cambiar de cámara
+        self._fuente_cam = None          # "usb" | "g1" | None (ninguna)
 
     # ── Arranque ──────────────────────────────────────────────────
 
@@ -209,21 +211,32 @@ class VentanaPrincipal:
         frame_btns = tk.Frame(self._barra, bg=c["acento"])
         frame_btns.pack(side="right", padx=8)
 
-        self._btn_camara = tk.Button(
-            frame_btns, text="▶  Iniciar cámara",
+        self._btn_cam_pc = tk.Button(
+            frame_btns, text="📷  Cámara PC",
             bg="#0ea5e9", fg="white", relief="flat",
             font=("Segoe UI", 9, "bold"), padx=12, pady=6,
-            cursor="hand2", command=self._toggle_camara,
+            cursor="hand2", command=lambda: self._activar_camara("usb"),
         )
-        self._btn_camara.pack(side="left", padx=4, pady=8)
+        self._btn_cam_pc.pack(side="left", padx=4, pady=8)
 
+        self._btn_cam_g1 = tk.Button(
+            frame_btns, text="🤖  Cámara G1",
+            bg=c["verde"], fg="#052e16", relief="flat",
+            font=("Segoe UI", 9, "bold"), padx=12, pady=6,
+            cursor="hand2", command=lambda: self._activar_camara("g1"),
+        )
+        self._btn_cam_g1.pack(side="left", padx=4, pady=8)
+
+        # Conector antiguo del G1 (solo si la app NO se abrió con --sin-robot).
+        # El G1 de SONIC (MuJoCo / real) se conecta desde la pestaña Voz / Texto → Seña.
         self._btn_robot = tk.Button(
             frame_btns, text="⚡  Conectar G1",
             bg=c["verde"], fg="#052e16", relief="flat",
             font=("Segoe UI", 9, "bold"), padx=12, pady=6,
             cursor="hand2", command=self._toggle_robot,
         )
-        self._btn_robot.pack(side="left", padx=4, pady=8)
+        if getattr(self.config, "robot_activo", False):
+            self._btn_robot.pack(side="left", padx=4, pady=8)
 
         tk.Button(
             frame_btns, text="⚙",
@@ -392,10 +405,12 @@ class VentanaPrincipal:
         self._robot.on_estado_cambio = self._on_estado_robot
         self._robot.on_comando_enviado = self._on_comando_robot
 
-    def _iniciar_camara(self) -> bool:
-        """Abre la cámara y arranca el reconocimiento. True si quedó en marcha."""
+    def _iniciar_camara(self, fuente: str = None) -> bool:
+        """Abre la cámara ("usb" = de la PC, "g1" = del robot) y arranca el reconocimiento.
+        True si quedó en marcha."""
         import cv2
-        if getattr(self.config, "camara_fuente", "usb") == "g1":
+        fuente = fuente or getattr(self.config, "camara_fuente", "usb")
+        if fuente == "g1":
             from robot.camara_g1 import CamaraG1
             self._cap = CamaraG1(self.config.camara_g1_host, self.config.camara_g1_puerto,
                                  binocular=self.config.camara_g1_binocular)
@@ -428,14 +443,20 @@ class VentanaPrincipal:
 
         self._hilo_camara = threading.Thread(target=self._bucle_camara, daemon=True)
         self._hilo_camara.start()
-        self._actualizar_video()
+        self._gen_video += 1
+        self._actualizar_video(self._gen_video)
         log.info(f"Cámara {nombre_cam} iniciada")
         return True
 
     def _detener_camara(self):
         self._activa = False
+        hilo = self._hilo_camara
+        if hilo is not None and hilo.is_alive() and hilo is not threading.current_thread():
+            hilo.join(timeout=3.0)      # que el hilo viejo termine antes de abrir otra cámara
+        self._hilo_camara = None
         if self._cap:
             self._cap.release()
+            self._cap = None
         if self._reconocedor:
             self._reconocedor.detener()
 
@@ -472,16 +493,16 @@ class VentanaPrincipal:
             except queue.Full:
                 pass
 
-    def _actualizar_video(self):
+    def _actualizar_video(self, gen=None):
         """Actualiza el label de video desde la cola de frames (hilo principal)."""
-        if not self._activa:
+        if not self._activa or (gen is not None and gen != self._gen_video):
             return
         try:
             frame = self._cola_frames.get_nowait()
             self._mostrar_frame(frame)
         except queue.Empty:
             pass
-        self._raiz.after(16, self._actualizar_video)  # ~60 Hz
+        self._raiz.after(16, self._actualizar_video, gen)  # ~60 Hz
 
     def _mostrar_frame(self, frame_bgr):
         """Convierte un frame BGR a PhotoImage de Tkinter y lo muestra."""
@@ -556,23 +577,43 @@ class VentanaPrincipal:
 
     # ── Controles ─────────────────────────────────────────────────
 
-    def _toggle_camara(self):
+    def _estilo_botones_camara(self):
         c = self._colores
-        if self._reconocedor and self._reconocedor.activo:
-            self._activa = False
+        nombres = {"usb": ("📷  Cámara PC", self._btn_cam_pc, "#0ea5e9", "white"),
+                   "g1": ("🤖  Cámara G1", self._btn_cam_g1, c["verde"], "#052e16")}
+        for fuente, (texto, boton, bg, fg) in nombres.items():
+            if self._fuente_cam == fuente:
+                boton.configure(text=f"■  Detener {texto.split('  ')[1]}", bg=c["rojo"], fg="white")
+            else:
+                boton.configure(text=texto, bg=bg, fg=fg)
+
+    def _activar_camara(self, fuente: str):
+        """Botones «Cámara PC» / «Cámara G1»: activan esa cámara; si ya es la activa, la detienen;
+        si hay otra activa, la cambian."""
+        c = self._colores
+        etiqueta = {"usb": "PC", "g1": "G1"}[fuente]
+        mismo = self._fuente_cam == fuente and self._reconocedor and self._reconocedor.activo
+        if self._fuente_cam is not None or (self._reconocedor and self._reconocedor.activo):
             self._detener_camara()
-            self._btn_camara.configure(text="▶  Iniciar cámara", bg="#0ea5e9")
+            self._fuente_cam = None
             self._lbl_status_cam.configure(text="● Cámara: inactiva", fg=c["rojo"])
             self._lbl_video.configure(image="", text="Cámara detenida", fg="#555")
-        else:
-            self._activa = True
-            if not self._iniciar_camara():       # falló: la interfaz sigue en «inactiva»
-                self._activa = False
-                self._btn_camara.configure(text="▶  Iniciar cámara", bg="#0ea5e9")
-                self._lbl_status_cam.configure(text="● Cámara: inactiva", fg=c["rojo"])
-                return
-            self._btn_camara.configure(text="■  Detener cámara", bg=c["rojo"])
-            self._lbl_status_cam.configure(text="● Cámara: activa", fg=c["verde"])
+        if mismo:
+            self._estilo_botones_camara()
+            return
+        self._lbl_video.configure(image="", text=f"Abriendo cámara {etiqueta}…", fg="#555")
+        self._lbl_video.update_idletasks()
+        self._activa = True
+        if not self._iniciar_camara(fuente):          # falló: la interfaz sigue en «inactiva»
+            self._activa = False
+            self._fuente_cam = None
+            self._lbl_video.configure(image="", text="Cámara detenida", fg="#555")
+            self._estilo_botones_camara()
+            self._lbl_status_cam.configure(text="● Cámara: inactiva", fg=c["rojo"])
+            return
+        self._fuente_cam = fuente
+        self._estilo_botones_camara()
+        self._lbl_status_cam.configure(text=f"● Cámara {etiqueta}: activa", fg=c["verde"])
 
     def _toggle_robot(self):
         if self._robot and self._robot.conectado:
