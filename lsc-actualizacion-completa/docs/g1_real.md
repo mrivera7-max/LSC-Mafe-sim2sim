@@ -146,6 +146,23 @@ oficial) y la recepción en una PC externa no está verificada; si `probar_micro
 paquetes, revisar cable/IP en 192.168.123.x y firewall UDP 5555. El reconocimiento (Google)
 requiere internet.
 
+## Una sola terminal: la app verifica y deja todo listo
+Se abre solo la terminal que lanza la app (`python app_unificada.py --sin-robot --v2`); todo lo demás se
+controla desde ella. Al abrir, la pestaña **🔌 Conexión** verifica y deja preparado lo necesario:
+
+| Comprobación | Qué hace |
+|---|---|
+| Robot en la red | Conecta al puerto SSH del PC2 (192.168.123.164) |
+| Acceso SSH al robot | Prueba el acceso sin contraseña; si falta, el botón **🔑 Configurar acceso SSH** pide la contraseña del robot **una sola vez**, crea la llave y la copia (no se guarda) |
+| Cable al robot | La interfaz del deploy (`enp131s0`) tiene IP 192.168.123.x y es la ruta hacia el robot |
+| Carpeta GR00T / deploy | Existe `deploy.sh` y el entorno `.venv*` |
+| Procesos antiguos | Avisa si quedó MuJoCo o un deploy de otra sesión; **🧹 Cerrar procesos antiguos** los termina |
+| Cámara del robot | Detecta la OBSBOT, desactiva la RealSense y deja `teleimager-server` publicando en :55556 |
+| Cámara de la PC, internet, micrófono, xdotool | Avisos informativos |
+
+El resultado es **✔ Todo listo**, **⚠ Listo con avisos** o **✖ Hay problemas** (con el motivo y qué hacer
+en cada fila). **↻ Verificar de nuevo** repite todo. Para saltarse la verificación: `--sin-verificar`.
+
 ## Arranque con los botones de la app (simulación o robot real)
 
 Todo se controla desde la app; **no hace falta abrir terminales** (solo la de la app). El simulador y el

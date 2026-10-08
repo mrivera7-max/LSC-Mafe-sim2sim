@@ -186,3 +186,61 @@ class ServidorCamaraG1:
             self._ssh("pkill -f '[t]eleimager-server'; echo ok", timeout=10)
         except ErrorCamaraG1 as e:
             log.warning(f"No se pudo detener teleimager-server: {e}")
+
+
+def configurar_acceso_ssh(host: str, usuario: str, clave: str,
+                          avisar: Optional[Callable[[str], None]] = None, espera_s: float = 45.0) -> Tuple[bool, str]:
+    """Deja SSH sin contraseña hacia el PC2: crea una llave en la PC si falta y la copia con
+    ssh-copy-id usando la clave dada (solo se usa para esto; no se guarda ni se escribe en logs)."""
+    import fcntl, pty, signal, termios, struct   # noqa: E401
+    ssh_dir = os.path.expanduser("~/.ssh")
+    os.makedirs(ssh_dir, mode=0o700, exist_ok=True)
+    if not any(os.path.exists(os.path.join(ssh_dir, f)) for f in ("id_ed25519.pub", "id_rsa.pub", "id_ecdsa.pub")):
+        if shutil.which("ssh-keygen") is None:
+            return False, "No está instalado ssh-keygen (sudo apt install openssh-client)."
+        if avisar:
+            avisar("Creando llave SSH en la PC…")
+        r = subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f",
+                            os.path.join(ssh_dir, "id_ed25519")], capture_output=True, text=True)
+        if r.returncode != 0:
+            return False, f"No se pudo crear la llave SSH: {r.stderr.strip()}"
+    if shutil.which("ssh-copy-id") is None:
+        return False, "No está instalado ssh-copy-id (sudo apt install openssh-client)."
+    if avisar:
+        avisar("Copiando la llave al robot…")
+    maestro, esclavo = pty.openpty()
+    proc = subprocess.Popen(["ssh-copy-id", "-o", "StrictHostKeyChecking=accept-new",
+                             "-o", "ConnectTimeout=8", f"{usuario}@{host}"],
+                            stdin=esclavo, stdout=esclavo, stderr=esclavo, close_fds=True,
+                            preexec_fn=lambda: (os.setsid(), fcntl.ioctl(0, termios.TIOCSCTTY, 0)))
+    os.close(esclavo)
+    buf, enviada, fin = b"", False, time.time() + espera_s
+    import select
+    try:
+        while time.time() < fin and proc.poll() is None:
+            if select.select([maestro], [], [], 0.3)[0]:
+                try:
+                    datos = os.read(maestro, 2048)
+                except OSError:
+                    break
+                buf = (buf + datos)[-4000:]
+                if not enviada and b"assword" in buf:
+                    os.write(maestro, clave.encode() + b"\n")
+                    enviada = True
+                    buf = b""
+                elif enviada and b"assword" in buf:        # volvió a pedirla: clave incorrecta
+                    proc.kill()
+                    return False, "La contraseña del robot no es correcta."
+        if proc.poll() is None:
+            proc.kill()
+            return False, "ssh-copy-id no terminó a tiempo."
+        ok = proc.returncode == 0
+    finally:
+        try:
+            os.close(maestro)
+        except OSError:
+            pass
+    if ok:
+        return True, "Acceso SSH sin contraseña configurado."
+    texto = buf.decode(errors="replace").strip().splitlines()
+    return False, "ssh-copy-id falló: " + (texto[-1] if texto else f"código {proc.returncode}")

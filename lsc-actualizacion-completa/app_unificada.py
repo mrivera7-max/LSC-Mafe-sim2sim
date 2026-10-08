@@ -46,7 +46,8 @@ class AppUnificada:
     ANCHO_MIN = 1100
     ALTO_MIN = 700
 
-    def __init__(self, config, sonic_opciones=None):
+    def __init__(self, config, sonic_opciones=None, verificar_al_inicio: bool = True):
+        self.verificar_al_inicio = verificar_al_inicio
         self.config = config
         self.sonic_opciones = sonic_opciones or {}
         self._raiz = None
@@ -76,6 +77,8 @@ class AppUnificada:
         notebook = ttk.Notebook(self._raiz)
         notebook.pack(fill="both", expand=True)
 
+        tab_con0 = tk.Frame(notebook, bg="#1a1a2e")
+        notebook.add(tab_con0, text="  🔌  Conexión  ")
         tab_cam = ttk.Frame(notebook)
         tab_voz = ttk.Frame(notebook)
         notebook.add(tab_cam, text="  📷  Cámara → Seña  ")
@@ -96,7 +99,18 @@ class AppUnificada:
         # La seña que detecta la cámara también la ejecuta el G1 de SONIC (MuJoCo o real)
         self.panel_camara.ejecutar_seña_sonic = self.panel_voz.ejecutar_desde_camara
 
-        log.info("Ventana unificada iniciada (3 pestañas: cámara, voz y consola)")
+        # ── Verificación de arranque: deja todo listo y lo muestra en la pestaña «Conexión»
+        from gui.panel_conexion import PanelConexion
+        from robot.verificacion import Verificador
+        self.panel_conexion = PanelConexion(
+            tab_con0, Verificador(self.config, self.panel_voz.lanzador), self._raiz)
+        self.panel_conexion.pack(fill="both", expand=True)
+        if self.verificar_al_inicio:
+            self._raiz.after(400, self.panel_conexion.verificar)
+        else:
+            notebook.select(tab_cam)
+
+        log.info("Ventana unificada iniciada (4 pestañas: conexión, cámara, voz y consola)")
         self._raiz.mainloop()
 
     def _al_cerrar(self):
@@ -128,6 +142,8 @@ def parsear_args():
                    help="IP del PC2 del G1 (teleimager-server) para el botón «Cámara G1» (default 192.168.123.164)")
     p.add_argument("--camara-g1-puerto", type=int, default=None, metavar="N",
                    help="Puerto ZMQ de la cámara en teleimager (default 55555; una cámara adicional suele ser 55556)")
+    p.add_argument("--sin-verificar", action="store_true",
+                   help="no verificar conexiones al abrir (abre directo en la pestaña de cámara)")
     p.add_argument("--terminales", action="store_true",
                    help="abrir MuJoCo y el deploy en terminales externas (por defecto corren dentro de la app)")
     p.add_argument("--sin-auto-g1", action="store_true",
@@ -218,7 +234,7 @@ def main():
                           mujoco_tam=_par(args.mujoco_tam, "x", "--mujoco-tam"),
                           integrado=not args.terminales)
     log.info(f"Micrófono de voz: {args.mic} (auto = G1 con robot real, PC con simulación)")
-    app = AppUnificada(config, sonic_opciones)
+    app = AppUnificada(config, sonic_opciones, verificar_al_inicio=not args.sin_verificar)
     app.ejecutar()
 
 
