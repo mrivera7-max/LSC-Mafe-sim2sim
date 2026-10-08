@@ -249,7 +249,7 @@ class VentanaPrincipal:
         c = self._colores
         # Label para mostrar el video
         self._lbl_video = tk.Label(self._frame_cam, bg="black",
-                                    text="Iniciando cámara...",
+                                    text="Pulsa «Cámara PC» o «Cámara G1» para empezar",
                                     fg="#333", font=("Segoe UI", 14))
         self._lbl_video.pack(fill="both", expand=True)
 
@@ -591,7 +591,8 @@ class VentanaPrincipal:
         """Botones «Cámara PC» / «Cámara G1»: activan esa cámara; si ya es la activa, la detienen;
         si hay otra activa, la cambian."""
         c = self._colores
-        etiqueta = {"usb": "PC", "g1": "G1"}[fuente]
+        if getattr(self, "_preparando_g1", False):
+            return
         mismo = self._fuente_cam == fuente and self._reconocedor and self._reconocedor.activo
         if self._fuente_cam is not None or (self._reconocedor and self._reconocedor.activo):
             self._detener_camara()
@@ -601,6 +602,56 @@ class VentanaPrincipal:
         if mismo:
             self._estilo_botones_camara()
             return
+        if fuente == "g1" and getattr(self.config, "camara_g1_auto", True):
+            self._preparar_g1_y_abrir()
+            return
+        self._abrir_fuente(fuente)
+
+    def _preparar_g1_y_abrir(self):
+        """Cámara G1: primero deja listo el servidor del robot por SSH (en un hilo) y luego abre."""
+        if getattr(self, "_preparando_g1", False):
+            return
+        self._preparando_g1 = True
+        for b in (self._btn_cam_pc, self._btn_cam_g1):
+            b.configure(state="disabled")
+        self._lbl_video.configure(image="", text="Preparando la cámara del robot…", fg="#555")
+
+        def aviso(msg):
+            self._contenedor.after(0, lambda: self._lbl_video.configure(image="", text=msg, fg="#555"))
+
+        def tarea():
+            from robot.servidor_camara_g1 import ServidorCamaraG1, ErrorCamaraG1
+            cfg = self.config
+            srv = ServidorCamaraG1(cfg.camara_g1_host, getattr(cfg, "camara_g1_usuario", "unitree"),
+                                   getattr(cfg, "camara_g1_clave", None),
+                                   nombre_camara=getattr(cfg, "camara_g1_nombre", "OBSBOT"))
+            try:
+                puerto = srv.preparar(aviso)
+                error = None
+            except ErrorCamaraG1 as e:
+                puerto, error = None, str(e)
+            except Exception as e:  # noqa: BLE001
+                puerto, error = None, f"Error inesperado: {e}"
+            self._contenedor.after(0, lambda: self._g1_preparado(puerto, error))
+
+        threading.Thread(target=tarea, daemon=True).start()
+
+    def _g1_preparado(self, puerto, error):
+        self._preparando_g1 = False
+        for b in (self._btn_cam_pc, self._btn_cam_g1):
+            b.configure(state="normal")
+        if error:
+            messagebox.showerror("Cámara del G1", error)
+            self._lbl_video.configure(image="", text="Cámara detenida", fg="#555")
+            self._estilo_botones_camara()
+            return
+        self.config.camara_g1_puerto = puerto      # la externa sale por 55556, no por el 55555 de la cabeza
+        self.config.camara_g1_binocular = False
+        self._abrir_fuente("g1")
+
+    def _abrir_fuente(self, fuente: str):
+        c = self._colores
+        etiqueta = {"usb": "PC", "g1": "G1"}[fuente]
         self._lbl_video.configure(image="", text=f"Abriendo cámara {etiqueta}…", fg="#555")
         self._lbl_video.update_idletasks()
         self._activa = True

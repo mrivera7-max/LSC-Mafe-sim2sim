@@ -28,7 +28,7 @@ como en el notebook `sim2real_v1`, ver el apartado «Variante: deploy en el Jets
 | Cámara → G1 | La seña detectada por la cámara la ejecuta el G1 si la confianza es ≥ 80 % (`--sonic-confianza`); mientras ejecuta otra, las nuevas se descartan |
 
 Con la app cerrada o colgada, el deploy vuelve a IDLE si pasa más de 1 s sin recibir `planner`
-(el robot sigue de pie y deja de seguir los brazos). La tecla **`O`** en la terminal del deploy es
+(el robot sigue de pie y deja de seguir los brazos). La tecla **`O`** (botón «O» de la consola de la app) es
 el paro de emergencia y siempre manda.
 
 ## Antes de empezar (checklist físico)
@@ -148,23 +148,29 @@ requiere internet.
 
 ## Arranque con los botones de la app (simulación o robot real)
 
-La pestaña **Voz / Texto → Seña** tiene dos botones y ya no hace falta abrir a mano las
-terminales del deploy ni de MuJoCo:
+Todo se controla desde la app; **no hace falta abrir terminales** (solo la de la app). El simulador y el
+deploy corren dentro de ella y se ven en la pestaña **🖥 Consola** (botón «Ver consola» de la barra; con el robot real se abre sola):
 
-- **🖥 Abrir simulación MuJoCo**: abre MuJoCo (T1) y el deploy `sim` (T2) en terminales, espera
-  «Init done» y enlaza solo. Después sueltas al G1 con `7` ×2 y `9` en la ventana de MuJoCo.
-- **🤖 Conectar robot real**: pide confirmar, abre el deploy con la interfaz del cable
-  (`enp131s0`; cámbiala con `--iface`), esperas a «Init done» (confirmas en esa terminal) y la app
-  muestra el checklist de seguridad antes de enviar START. El micrófono pasa al del G1.
+- **🖥 Abrir simulación MuJoCo**: inicia MuJoCo y el deploy `sim`, espera «Init done» y enlaza solo.
+  Después sueltas al G1 con `7` ×2 y `9` en la ventana de MuJoCo.
+- **🤖 Conectar robot real**: pide confirmar, inicia el deploy con la interfaz del cable
+  (`enp131s0`; cámbiala con `--iface`), abre la pestaña Consola (si el deploy pide confirmar, pulsa **↵ Enter** ahí),
+  y al ver «Init done» muestra el checklist de seguridad antes de enviar START. El micrófono pasa al del G1.
+- **✖ Cerrar todo**: desconecta y detiene lo que abrió la app (MuJoCo y/o deploy) con Ctrl+C.
+  Con el robot real pide confirmación.
+- **■ Desconectar**: corta el enlace sin cerrar el deploy. **■ PARAR**: paro por software.
 
-Si el botón dice **▶ Enlazar …**, el deploy ya está abierto y solo falta conectar. **✖ Cerrar simulación** termina MuJoCo y su deploy (solo en simulación; el robot real se detiene con `O`/PARAR). **■ Desconectar**
-corta el enlace sin cerrar las terminales. Tras **■ PARAR** hay que cerrar la terminal del deploy y
-volver a pulsar el botón.
+Si el botón dice **▶ Enlazar …**, el deploy ya está en marcha y solo falta conectar.
+Tras **■ PARAR**: Desconectar, «✖ Cerrar todo» y volver a pulsar el botón.
+
+### Pestaña Consola
+Muestra la salida del proceso elegido (MuJoCo, deploy simulación, deploy robot real) y tiene los botones
+**↵ Enter**, **O Paro de emergencia** (envía la tecla `O` al deploy), **Ctrl+C** y una línea para escribir.
+Cambiar de pestaña no detiene nada. Al cerrar la app se detienen los procesos que abrió.
+Para volver a terminales externas (como antes): `--terminales`.
 
 Ruta del repositorio GR00T: `--gr00t-dir RUTA` o variable `GR00T_DIR` (por defecto
-`/home/udirobotika/DURVVIN/SIM2SIM/blea/GR00T-WholeBodyControl`). Requiere `gnome-terminal`
-(o xterm/konsole) y el comando `script`. Si no se puede abrir una terminal, la app escribe en el
-registro los comandos para ejecutarlos a mano.
+`/home/udirobotika/DURVVIN/SIM2SIM/blea/GR00T-WholeBodyControl`).
 
 ### Posición de la ventana de MuJoCo
 La app mueve la ventana de MuJoCo al abrirse (por defecto esquina superior izquierda, `0,0`):
@@ -176,9 +182,23 @@ Si hay ventanas de MuJoCo duplicadas: `pkill -f run_sim_loop.py; pkill -f g1_dep
 ## Cámara: botones «Cámara PC» y «Cámara G1»
 En la pestaña **📷 Cámara → Seña**, arriba a la derecha, hay dos botones. Al abrir la app no hay cámara activa:
 - **📷 Cámara PC**: webcam USB (índice `--camara N`, por defecto 0).
-- **🤖 Cámara G1**: cámara por `teleimager-server` del PC2 (requiere la Terminal A). IP, puerto y modo
-  mono con `--camara-g1 [IP]`, `--camara-g1-puerto 55556`, `--camara-g1-mono` (ya no hace falta
-  `--camara-g1` para que funcione el botón).
-Pulsar el botón de la cámara activa la detiene; pulsar el otro cambia de cámara sin reiniciar la app. Si la
-cámara no abre, queda «inactiva» con el aviso del motivo. El botón antiguo «⚡ Conectar G1» solo aparece
-si la app se abre sin `--sin-robot`; el G1 de SONIC se conecta desde la pestaña Voz / Texto → Seña.
+- **🤖 Cámara G1**: la app prepara sola el robot por SSH y abre la cámara externa (OBSBOT):
+  1. busca qué `/dev/videoN` es la OBSBOT (el número cambia entre reinicios);
+  2. escribe `~/teleimager/cam_config_server.yaml` con la RealSense desactivada y la externa activa
+     (copia de seguridad en `cam_config_server.yaml.lsc_bak`);
+  3. inicia `teleimager-server` en segundo plano (registro en `/tmp/teleimager_lsc.log` del robot) si no corría;
+  4. espera el puerto 55556 y abre la imagen (960x540).
+  Ya no se necesita la «Terminal A» ni editar el yaml a mano.
+
+**Una sola vez** (acceso SSH sin contraseña al PC2), en una terminal de la PC:
+```
+ssh-copy-id unitree@192.168.123.164
+```
+(Alternativa: `sudo apt install sshpass` y `--g1-clave CLAVE`.) Opciones: `--g1-usuario`, `--g1-camara-nombre TXT`
+(texto que identifica la cámara en `v4l2-ctl --list-devices`, por defecto `OBSBOT`), `--camara-g1 [IP]`,
+`--sin-auto-g1` (no preparar por SSH: `teleimager-server` ya corre a mano; usa `--camara-g1-puerto` y `--camara-g1-mono`).
+
+Pulsar el botón de la cámara activa la detiene; pulsar el otro cambia de cámara sin reiniciar la app. Si algo
+falla (SSH, cámara no encontrada, servidor sin arrancar) aparece el motivo y la cámara queda «inactiva».
+El servidor del robot sigue encendido al detener la cámara (se reactiva al instante). El botón antiguo
+«⚡ Conectar G1» solo aparece si la app se abre sin `--sin-robot`.

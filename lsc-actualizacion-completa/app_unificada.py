@@ -80,6 +80,8 @@ class AppUnificada:
         tab_voz = ttk.Frame(notebook)
         notebook.add(tab_cam, text="  📷  Cámara → Seña  ")
         notebook.add(tab_voz, text="  🎤  Voz / Texto → Seña  ")
+        tab_con = tk.Frame(notebook, bg="#0d1117")
+        notebook.add(tab_con, text="  🖥  Consola  ")
 
         # ── Montar cada sistema dentro de su pestaña ──────────────
         # Cada clase construye su UI sobre el frame que le pasamos,
@@ -89,11 +91,12 @@ class AppUnificada:
 
         self.panel_voz = VentanaVozASena(**self.sonic_opciones)
         self.panel_voz.montar_en(tab_voz, self._raiz)
+        self.panel_voz.montar_consola(tab_con, lambda: notebook.select(tab_con))
         self.panel_voz.robot = self.panel_camara._robot  # compartir el conector
         # La seña que detecta la cámara también la ejecuta el G1 de SONIC (MuJoCo o real)
         self.panel_camara.ejecutar_seña_sonic = self.panel_voz.ejecutar_desde_camara
 
-        log.info("Ventana unificada iniciada (2 pestañas)")
+        log.info("Ventana unificada iniciada (3 pestañas: cámara, voz y consola)")
         self._raiz.mainloop()
 
     def _al_cerrar(self):
@@ -107,6 +110,7 @@ class AppUnificada:
         try:
             if self.panel_voz:
                 self.panel_voz.cerrar()
+                self.panel_voz.cerrar_procesos()
         except Exception as e:
             log.warning(f"Error al cerrar voz: {e}")
         self._raiz.quit()
@@ -124,6 +128,15 @@ def parsear_args():
                    help="IP del PC2 del G1 (teleimager-server) para el botón «Cámara G1» (default 192.168.123.164)")
     p.add_argument("--camara-g1-puerto", type=int, default=None, metavar="N",
                    help="Puerto ZMQ de la cámara en teleimager (default 55555; una cámara adicional suele ser 55556)")
+    p.add_argument("--terminales", action="store_true",
+                   help="abrir MuJoCo y el deploy en terminales externas (por defecto corren dentro de la app)")
+    p.add_argument("--sin-auto-g1", action="store_true",
+                   help="«Cámara G1» NO prepara el robot por SSH (teleimager-server ya corre a mano)")
+    p.add_argument("--g1-usuario", default="unitree", metavar="USR", help="usuario SSH del PC2 del G1")
+    p.add_argument("--g1-clave", default=None, metavar="CLAVE",
+                   help="clave SSH del PC2 (necesita sshpass; mejor usar ssh-copy-id una vez)")
+    p.add_argument("--g1-camara-nombre", default="OBSBOT", metavar="TXT",
+                   help="texto que identifica la cámara externa en v4l2-ctl (defecto OBSBOT)")
     p.add_argument("--camara-g1-mono", action="store_true",
                    help="Forzar imagen de un solo lente (no recortar). Por defecto se detecta solo")
     p.add_argument("--sonic-real", action="store_true",
@@ -185,6 +198,10 @@ def main():
         config.camara_g1_puerto = args.camara_g1_puerto
     if args.camara_g1_mono:
         config.camara_g1_binocular = False
+    config.camara_g1_auto = not args.sin_auto_g1
+    config.camara_g1_usuario = args.g1_usuario
+    config.camara_g1_clave = args.g1_clave
+    config.camara_g1_nombre = args.g1_camara_nombre
     config.robot_activo = not args.sin_robot
     config.usar_v2 = args.v2 or config.usar_v2
 
@@ -198,7 +215,8 @@ def main():
     sonic_opciones.update(mic=args.mic, mic_iface_ip=args.mic_g1_ip,
                           gr00t_dir=args.gr00t_dir, interfaz=args.iface,
                           mujoco_pos=_par(args.mujoco_pos, ",", "--mujoco-pos"),
-                          mujoco_tam=_par(args.mujoco_tam, "x", "--mujoco-tam"))
+                          mujoco_tam=_par(args.mujoco_tam, "x", "--mujoco-tam"),
+                          integrado=not args.terminales)
     log.info(f"Micrófono de voz: {args.mic} (auto = G1 con robot real, PC con simulación)")
     app = AppUnificada(config, sonic_opciones)
     app.ejecutar()

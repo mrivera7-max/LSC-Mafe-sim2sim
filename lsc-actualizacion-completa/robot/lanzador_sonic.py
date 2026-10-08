@@ -10,16 +10,21 @@ Las terminales quedan abiertas para que se vean los avisos y se pueda pulsar O (
 La salida del deploy se registra con `script` para saber cuándo aparece «Init done».
 """
 
+import fcntl
 import logging
 import os
+import pty
 import re
+import signal
+import struct
+import termios
 import shlex
 import shutil
 import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, Dict, List, Optional
 
 log = logging.getLogger("robot.lanzador_sonic")
 
@@ -31,10 +36,93 @@ _INIT_DONE = re.compile(r"init\s*done", re.IGNORECASE)
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 
+class _Proceso:
+    """Un proceso hijo con su propio pseudo-terminal: se lee su salida y se le pueden enviar teclas
+    (Enter, O, Ctrl+C), igual que en una terminal."""
+
+    MAX = 200_000
+
+    def __init__(self, nombre: str, comando: str, ruta_log: Optional[Path]):
+        self.nombre = nombre
+        self.texto = ""
+        self._lock = threading.Lock()
+        self._log = open(ruta_log, "ab", buffering=0) if ruta_log else None
+        maestro, esclavo = pty.openpty()
+        fcntl.ioctl(esclavo, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 160, 0, 0))
+
+        def hijo():
+            os.setsid()
+            fcntl.ioctl(0, termios.TIOCSCTTY, 0)       # terminal de control: Ctrl+C llega al deploy
+
+        self.proc = subprocess.Popen(["bash", "-lc", comando], stdin=esclavo, stdout=esclavo,
+                                     stderr=esclavo, preexec_fn=hijo, close_fds=True)
+        os.close(esclavo)
+        self._maestro = maestro
+        threading.Thread(target=self._leer, daemon=True).start()
+
+    def _leer(self):
+        while True:
+            try:
+                datos = os.read(self._maestro, 4096)
+            except OSError:
+                break
+            if not datos:
+                break
+            if self._log:
+                self._log.write(datos)
+            with self._lock:
+                self.texto = (self.texto + datos.decode(errors="replace"))[-self.MAX:]
+        try:
+            os.close(self._maestro)
+        except OSError:
+            pass
+
+    @property
+    def vivo(self) -> bool:
+        return self.proc.poll() is None
+
+    def leer(self) -> str:
+        with self._lock:
+            return self.texto
+
+    def enviar(self, datos: bytes) -> bool:
+        if not self.vivo:
+            return False
+        try:
+            os.write(self._maestro, datos)
+            return True
+        except OSError:
+            return False
+
+    def terminar(self, espera: float = 4.0):
+        """Ctrl+C (como en la terminal); si no responde, SIGTERM y luego SIGKILL al grupo."""
+        if not self.vivo:
+            return
+        self.enviar(b"\x03")
+        for sig, t in ((None, espera), (signal.SIGTERM, 3.0), (signal.SIGKILL, 2.0)):
+            if sig is not None:
+                try:
+                    os.killpg(self.proc.pid, sig)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            try:
+                self.proc.wait(timeout=t)
+                return
+            except subprocess.TimeoutExpired:
+                continue
+
+
 class LanzadorSonic:
     def __init__(self, directorio: Optional[str] = None, interfaz: Optional[str] = None,
-                 posicion: Optional[tuple] = (0, 0), tamano: Optional[tuple] = None):
-        """posicion (x, y) y tamano (ancho, alto) de la ventana de MuJoCo; None = no tocarla."""
+                 posicion: Optional[tuple] = (0, 0), tamano: Optional[tuple] = None,
+                 integrado: bool = True):
+        """posicion (x, y) y tamano (ancho, alto) de la ventana de MuJoCo; None = no tocarla.
+
+        integrado=True: los procesos corren dentro de la app (sin terminales; se ven y se
+        controlan desde la consola de la app). False: abre terminales externas como antes.
+        """
+        self.integrado = integrado
+        self._procs: Dict[str, "_Proceso"] = {}
         self.posicion = posicion
         self.tamano = tamano
         self.directorio = Path(directorio or os.environ.get("GR00T_DIR") or DIR_DEFECTO).expanduser()
@@ -115,6 +203,57 @@ class LanzadorSonic:
             self.error = f"No se pudo abrir la terminal: {e}"
             return False
 
+    # ── Modo integrado (sin terminales) ──────────────────────────────
+    NOMBRES = {"sim": "MuJoCo", "deploy_sim": "Deploy (simulación)", "deploy_real": "Deploy (robot real)"}
+
+    def _arrancar(self, clave: str, comando: str, con_log: bool = True) -> bool:
+        previo = self._procs.get(clave)
+        if previo is not None and previo.vivo:
+            previo.terminar()
+        DIR_LOGS.mkdir(parents=True, exist_ok=True)
+        ruta = self.ruta_log(clave if clave != "sim" else "mujoco")
+        ruta.write_text("")
+        try:
+            self._procs[clave] = _Proceso(clave, comando, ruta if con_log else None)
+            return True
+        except OSError as e:
+            self.error = f"No se pudo iniciar {self.NOMBRES.get(clave, clave)}: {e}"
+            return False
+
+    def salida(self, clave: str) -> str:
+        p = self._procs.get(clave)
+        return _ANSI.sub("", p.leer()).replace("\r\n", "\n").replace("\r", "\n") if p else ""
+
+    def proceso_vivo(self, clave: str) -> bool:
+        p = self._procs.get(clave)
+        return bool(p and p.vivo)
+
+    def claves_activas(self) -> List[str]:
+        return [k for k, p in self._procs.items() if p.vivo]
+
+    def enviar(self, clave: str, texto: str) -> bool:
+        """Envía teclas al proceso (texto tal cual; '\\n' = Enter, '\\x03' = Ctrl+C)."""
+        p = self._procs.get(clave)
+        return bool(p and p.enviar(texto.encode()))
+
+    def cerrar_todo(self) -> str:
+        """Cierra los procesos que lanzó la app (Ctrl+C) y limpia restos."""
+        cerrados = []
+        for clave, p in list(self._procs.items()):
+            if p.vivo:
+                p.terminar()
+                cerrados.append(self.NOMBRES.get(clave, clave))
+        self._procs.clear()
+        return ", ".join(cerrados)
+
+    def _lanzar_integrado(self, real: bool) -> bool:
+        if not real:
+            if not self._arrancar("sim", self.comando_sim()):
+                return False
+            if self.posicion is not None:
+                threading.Thread(target=self.posicionar_ventana, daemon=True).start()
+        return self._arrancar("deploy_real" if real else "deploy_sim", self.comando_deploy(real))
+
     def lanzar(self, real: bool) -> bool:
         """Simulación: MuJoCo + deploy sim. Real: solo deploy real."""
         self.error = None
@@ -123,6 +262,8 @@ class LanzadorSonic:
             self.error = msg
             return False
         try:
+            if self.integrado:
+                return self._lanzar_integrado(real)
             if not real:
                 if not self.abrir_terminal("LSC · Simulador (T1)", self.comando_sim()):
                     return False
@@ -156,18 +297,31 @@ class LanzadorSonic:
         return bool(_INIT_DONE.search(texto))
 
     def hay_log(self, real: bool) -> bool:
-        return shutil.which("script") is not None
+        return self.integrado or shutil.which("script") is not None
 
     def cerrar_simulacion(self) -> str:
         """Termina MuJoCo y el deploy de la simulación. Devuelve qué proceso se cerró."""
         cerrados = []
+        for clave in ("sim", "deploy_sim"):          # los que lanzó la app: Ctrl+C como en la terminal
+            p = self._procs.pop(clave, None)
+            if p is not None and p.vivo:
+                p.terminar()
+                cerrados.append(self.NOMBRES[clave])
         for etiqueta, patron in (("MuJoCo", "run_sim_loop.py"),
                                  ("deploy", "g1_deploy_onnx_ref"),
                                  ("deploy.sh", "gear_sonic_deploy/deploy.sh|\\./deploy.sh --input-type zmq_manager sim")):
             r = subprocess.run(["pkill", "-f", patron], capture_output=True)
             if r.returncode == 0:
                 cerrados.append(etiqueta)
-        return ", ".join(cerrados) if cerrados else "nada (ya estaba cerrada)"
+        return ", ".join(dict.fromkeys(cerrados)) if cerrados else "nada (ya estaba cerrada)"
+
+    def cerrar_deploy_real(self) -> str:
+        """Detiene el deploy del robot real con Ctrl+C (la forma documentada de terminarlo)."""
+        p = self._procs.pop("deploy_real", None)
+        if p is not None and p.vivo:
+            p.terminar()
+            return "deploy real"
+        return ""
 
     def posicionar_ventana(self, esperar: float = 60.0) -> bool:
         """Mueve (y opcionalmente redimensiona) la ventana de MuJoCo cuando aparece (X11).

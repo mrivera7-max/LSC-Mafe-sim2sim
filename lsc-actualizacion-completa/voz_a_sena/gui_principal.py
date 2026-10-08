@@ -32,7 +32,7 @@ class VentanaVozASena:
                  vel_max=None, confianza_min: float = 0.8,
                  mic: str = "pc", mic_iface_ip: str = None,
                  gr00t_dir: str = None, interfaz: str = None,
-                 mujoco_pos=(0, 0), mujoco_tam=None):
+                 mujoco_pos=(0, 0), mujoco_tam=None, integrado: bool = True):
         """
         modo_real      True: el deploy SONIC mueve el G1 FÍSICO (no MuJoCo). Exige confirmar
                        el checklist de seguridad y limita amplitud y velocidad de las señas.
@@ -46,7 +46,9 @@ class VentanaVozASena:
         self.confianza_min = confianza_min
         self.mic = mic
         self._mic_iface_ip = mic_iface_ip
-        self.lanzador = LanzadorSonic(gr00t_dir, interfaz, mujoco_pos, mujoco_tam)
+        self.lanzador = LanzadorSonic(gr00t_dir, interfaz, mujoco_pos, mujoco_tam, integrado=integrado)
+        self.consola = None
+        self._mostrar_pestana_consola = lambda: None
         self._lanzado = {False: False, True: False}   # ¿ya se abrió la sim / el deploy real?
         self._esperando = False
         self.servidor = ServidorVozASena(
@@ -130,7 +132,9 @@ class VentanaVozASena:
             state="disabled" if busy else "normal")
         self._boton_sonic.configure(state="normal" if self._conectado() else "disabled")
         self._boton_cerrar_sim.configure(
-            state="normal" if self._lanzado[False] and not self._conectando_sonic else "disabled")
+            state="normal" if (self._lanzado[False] or self._lanzado[True]) and not self._conectando_sonic
+            else "disabled")
+        self._boton_consola.configure(state="normal" if self.lanzador.integrado else "disabled")
 
     def _pulsar(self, real: bool):
         """Botón de simulación (real=False) o de robot real (real=True)."""
@@ -145,7 +149,8 @@ class VentanaVozASena:
                     "Se abrirá el deploy SONIC en modo REAL "
                     f"(interfaz {self.lanzador.interfaz}).\n\n"
                     "El robot debe estar en el arnés, con espacio libre y la persona de la "
-                    "tecla O lista. En la terminal que se abra, confirma el deploy.\n"
+                    "tecla O lista. Se abrirá la consola de la app: si el deploy pide confirmar, "
+                    "responde ahí (botón ↵ Enter).\n"
                     "Todavía NO se mueve nada: antes de enviar START se pedirá otra confirmación.",
                     icon="warning", parent=self._raiz):
                 self._agregar_log("Robot real cancelado.")
@@ -158,19 +163,24 @@ class VentanaVozASena:
                 self._refrescar_botones()
                 return
             self._lanzado[real] = True
+            if real and self.lanzador.integrado:
+                self._abrir_consola("deploy_real")
             self._esperando = True
             self._refrescar_botones()
             if self.lanzador.hay_log(real):
-                self._agregar_log(("Abierto el deploy REAL" if real else "Abiertos MuJoCo y el deploy")
-                                  + ". Si te pide confirmar, hazlo en esa terminal; "
-                                    "cuando termine de iniciar (Init done) se enlaza solo.")
+                self._agregar_log(("Iniciado el deploy REAL" if real else "Iniciados MuJoCo y el deploy")
+                                  + (" (consola de la app, botón «🖥 Consola»)" if self.lanzador.integrado
+                                     else " (terminales)")
+                                  + ". Si pide confirmar, hazlo ahí; cuando termine de "
+                                  + ("iniciar (Init done) se mostrará el checklist de seguridad."
+                                     if real else "iniciar (Init done) se enlaza solo."))
                 self._lbl_sonic.configure(text="● Esperando «Init done»…", fg="#fde68a")
                 self._espera_ini = __import__("time").time()
                 self._sondear_deploy(real)
             else:
                 self._esperando = False
                 self._refrescar_botones()
-                self._agregar_log("Cuando veas «Init done» en la terminal del deploy, pulsa «▶ Enlazar».")
+                self._agregar_log("Cuando veas «Init done» en el deploy, pulsa «▶ Enlazar».")
         else:
             self._enlazar(real)
 
@@ -187,7 +197,7 @@ class VentanaVozASena:
             self._esperando = False
             self._lbl_sonic.configure(text=f"● {self._nombre_destino} sin conectar", fg="#bfdbfe")
             self._refrescar_botones()
-            self._agregar_log("No vi «Init done» en 2 min. Revisa la terminal del deploy; "
+            self._agregar_log("No vi «Init done» en 2 min. Revisa la consola (🖥 Consola); "
                               "si ya inició, pulsa «▶ Enlazar».")
         else:
             self._raiz.after(1000, self._sondear_deploy, real)
@@ -207,25 +217,63 @@ class VentanaVozASena:
         self._lbl_sonic.configure(text="● Conectando…", fg="#fde68a")
         threading.Thread(target=self._conectar_sonic, daemon=True).start()
 
-    def _cerrar_simulacion(self):
-        """Desconecta (si hace falta) y cierra MuJoCo y el deploy de la simulación."""
+    def _cerrar_todo(self):
+        """Desconecta (si hace falta) y cierra MuJoCo y los deploys que abrió la app."""
         if self._conectando_sonic:
             return
+        if self._lanzado[True] and not messagebox.askokcancel(
+                "Cerrar robot real",
+                "Se detendrá el deploy del robot real (Ctrl+C).\n\n"
+                "Asegúrate de que el G1 esté en una posición segura (arnés / control remoto).",
+                icon="warning", parent=self._raiz):
+            return
         self._esperando = False
+        real, sim = self._lanzado[True], self._lanzado[False]
+
         def tarea():
-            if self._conectado() and not self.modo_real:
+            if self._conectado():
                 with self._lock_sonic:
                     self.cerrar()
-            msg = self.lanzador.cerrar_simulacion()
-            self._raiz.after(0, self._simulacion_cerrada, msg)
+            partes = []
+            if sim:
+                partes.append(self.lanzador.cerrar_simulacion())
+            if real:
+                partes.append(self.lanzador.cerrar_deploy_real() or "deploy real (ciérralo en su terminal)")
+            self._raiz.after(0, self._todo_cerrado, ", ".join(p for p in partes if p))
         threading.Thread(target=tarea, daemon=True).start()
 
-    def _simulacion_cerrada(self, msg: str):
-        self._lanzado[False] = False
+    def _todo_cerrado(self, msg: str):
+        self._lanzado = {False: False, True: False}
         self._lbl_sonic.configure(text="● Sin conectar", fg="#bfdbfe")
         self._boton_parar.configure(state="disabled")
         self._refrescar_botones()
-        self._agregar_log(f"Simulación cerrada: {msg}. Cierra también las terminales vacías.")
+        self._agregar_log(f"Cerrado: {msg or 'nada que cerrar'}.")
+
+    def _abrir_consola(self, clave: str = None):
+        """Muestra la pestaña «Consola» (salida del simulador/deploy y botones Enter, O, Ctrl+C)."""
+        from voz_a_sena.consola_sonic import ConsolaSonic
+        if clave is None:
+            clave = "deploy_real" if self.modo_real else "deploy_sim"
+        if self.consola is None:                       # app sin pestañas (modo autónomo): ventana propia
+            ventana = tk.Toplevel(self._raiz)
+            ventana.title("LSC · Consola del simulador / deploy")
+            ventana.geometry("900x520+120+100")
+            self.consola = ConsolaSonic(ventana, self.lanzador, clave)
+            self.consola.pack(fill="both", expand=True)
+            self._mostrar_pestana_consola = lambda: ventana.deiconify() or ventana.lift()
+        self.consola.seleccionar(clave)
+        self._mostrar_pestana_consola()
+
+    def montar_consola(self, contenedor, mostrar):
+        """Crea el panel de consola dentro de `contenedor` (una pestaña); `mostrar()` la selecciona."""
+        from voz_a_sena.consola_sonic import ConsolaSonic
+        self.consola = ConsolaSonic(contenedor, self.lanzador)
+        self.consola.pack(fill="both", expand=True)
+        self._mostrar_pestana_consola = mostrar
+
+    def cerrar_procesos(self) -> str:
+        """Al salir de la app: detiene lo que ella abrió (simulador y deploys)."""
+        return self.lanzador.cerrar_todo()
 
     def _alternar_sonic(self):
         """Botón «Desconectar»."""
@@ -239,8 +287,8 @@ class VentanaVozASena:
             "Antes de continuar confirma TODO esto:\n\n"
             "  1. El G1 está en el arnés / sostenido, con espacio libre alrededor.\n"
             "  2. El deploy corre en modo REAL y mostró «Init Done».\n"
-            "  3. Hay una persona con la mano en la tecla O de la terminal del deploy\n"
-            "     (paro de emergencia) y el control remoto de Unitree a mano.\n"
+            "  3. Hay una persona lista para el paro de emergencia: botón «O» de la consola\n"
+            "     (o tecla O en la terminal del deploy) y el control remoto de Unitree a mano.\n"
             "  4. Nadie está cerca de los brazos del robot.\n\n"
             "Al aceptar se envía START: la política tomará el control del robot.",
             icon="warning", parent=self._raiz,
@@ -270,7 +318,7 @@ class VentanaVozASena:
             s = self.sonic
             self._agregar_log(f"START enviado al deploy. Amplitud {s.escala:.0%}, tiempos x{s.factor_tiempo:g}, "
                               f"vel. máx. {s.vel_max} rad/s. Botón PARAR = paro por software; "
-                              f"tecla O en la terminal del deploy = paro de emergencia.")
+                              f"botón «O» de la consola = paro de emergencia.")
         else:
             self._agregar_log("Publicando hacia el deploy SONIC. Si el G1 sigue colgado, "
                               "pulsa 9 en la ventana de MuJoCo para soltarlo.")
@@ -297,8 +345,8 @@ class VentanaVozASena:
         self._boton_parar.configure(state="disabled")
         self._lbl_sonic.configure(text=f"● {self._nombre_destino}: PARADO", fg="#fca5a5")
         self._lanzado[self.modo_real] = False   # tras PARAR hay que reiniciar el deploy
-        self._agregar_log("PARADA enviada al deploy. Para reanudar: cierra la terminal del deploy, "
-                          "pulsa Desconectar y vuelve a abrir desde el botón.")
+        self._agregar_log("PARADA enviada al deploy. Para reanudar: pulsa Desconectar, «✖ Cerrar todo» "
+                          "y vuelve a abrir desde el botón.")
 
     def _construir_ui(self):
         c_fondo = "#1a1a2e"
@@ -353,8 +401,13 @@ class VentanaVozASena:
         self._boton_cerrar_sim = tk.Button(
             barra, text="✖ Cerrar simulación", bg="#475569", fg="white", relief="flat",
             font=("Segoe UI", 10, "bold"), pady=8, cursor="hand2", state="disabled",
-            command=self._cerrar_simulacion)
-        self._boton_cerrar_sim.pack(side="left", padx=(0, 0))
+            command=self._cerrar_todo)
+        self._boton_cerrar_sim.pack(side="left", padx=(0, 6))
+        self._boton_consola = tk.Button(
+            barra, text="🖥 Ver consola", bg="#334155", fg="white", relief="flat",
+            font=("Segoe UI", 10, "bold"), pady=8, cursor="hand2",
+            command=lambda: self._abrir_consola())
+        self._boton_consola.pack(side="left")
 
         # Panel de entrada de texto
         panel_texto = tk.Frame(cont, bg=c_panel, padx=20, pady=16)
@@ -630,6 +683,7 @@ class VentanaVozASena:
     def _cerrar(self):
         log.info("Cerrando aplicacion...")
         self.cerrar()
+        self.cerrar_procesos()
         self._raiz.quit()
         self._raiz.destroy()
 
